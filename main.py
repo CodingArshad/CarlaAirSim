@@ -39,6 +39,29 @@ def update_airsim_settings(num_agents):
         }
     }
 
+    # Full horizontal sweep (-180 to 180), narrow vertical band - the drone
+    # only needs to know what's in its flight plane, not build a 3D map.
+    # Range of 20m gives headroom over the ~5m SAFETY_DISTANCE threshold in
+    # drone.py, since the drone travels ~1.25m per reactive-loop tick at
+    # MOVE_SPEED and needs to see obstacles well before it's that close.
+    lidar_settings = {
+        "Lidar1": {
+            "SensorType": 6,
+            "Enabled": True,
+            "NumberOfChannels": 4,
+            "Range": 20,
+            "PointsPerSecond": 10000,
+            "RotationsPerSecond": 10,
+            "HorizontalFOVStart": -180,
+            "HorizontalFOVEnd": 180,
+            "VerticalFOVUpper": 5,
+            "VerticalFOVLower": -5,
+            "X": 0.2, "Y": 0.0, "Z": -0.1,
+            "Roll": 0.0, "Pitch": 0.0, "Yaw": 0.0,
+            "DataFrame": "SensorLocalFrame"
+        }
+    }
+
     vehicles = {}
     # Starts at 1, not 2: every drone including Drone1 must be listed here,
     # or this overwrites settings.json with an empty vehicle list and AirSim
@@ -50,7 +73,8 @@ def update_airsim_settings(num_agents):
             "X": i * SPACING,
             "Y": 0.0,
             "Z": 0.0,
-            "Cameras": camera_settings
+            "Cameras": camera_settings,
+            "Sensors": lidar_settings
         }
 
     settings_data = {
@@ -164,6 +188,8 @@ def main():
         try:
             drone.connect_and_takeoff()
             drone.run_mission(missions["Drone1"])
+        except Exception as e:
+            print(f"\n[Drone1] Error: {e}")
         finally:
             drone.shutdown()
     else:

@@ -1,18 +1,15 @@
-"""Local Llama planner via Ollama - no API key needed (Arshad's 17, can't get
-a Gemini key). CPU-only (num_gpu=0): running the model on GPU alongside
-CarlaAir maxes shared VRAM and slows the sim - found the hard way last time."""
-
 import json
+import ollama
 
+from ..core.interfaces import MissionPlanner
 from ..core.schema import build_plan_schema
 from .base_planner import FEWSHOT, SYSTEM_PROMPT, PlanError, validate_plan
 
 MODEL = "llama3.1:8b"
 
 
-class LlamaPlanner:
+class LlamaPlanner(MissionPlanner):
     def __init__(self, model: str = MODEL):
-        import ollama  # lazy import
         self._ollama = ollama
         self.model = model
         self._schema = build_plan_schema()

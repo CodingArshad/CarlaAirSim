@@ -15,6 +15,7 @@ from ..control.navigation import (
     LAND_SLOW_SPEED, MOVE_SPEED,
 )
 from ..core.enums import ActionType
+from ..core.interfaces import VehicleAdapter
 
 # world-frame (x, y) unit direction per strafe action - heading is held fixed,
 # the drone strafes rather than turning to face its travel direction.
@@ -26,7 +27,7 @@ _DIRECTIONS = {
 }
 
 
-class AirSimVehicleAdapter:
+class AirSimVehicleAdapter(VehicleAdapter):
     def __init__(self, vehicle_name="Drone1"):
         import airsim  # lazy import, only needed when actually flying
         self._airsim = airsim

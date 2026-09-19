@@ -33,12 +33,19 @@ SYSTEM_PROMPT = (
     f"- 'go home' / 'return' means fly_to x=0.0, y=0.0, z={DEFAULT_HEIGHT}.\n"
     "- 'land' or 'touch down' means the land action, placed last.\n"
     "- Add ONE step for EVERY thing the user asks for. Never skip a part.\n"
+    "- Add NOTHING the user did not ask for. Never add land, return-home, or "
+    "extra moves unless the user says so. The drone stays in the air after the plan ends.\n"
     "- distance and duration must be greater than 0."
 )
 
 # Few-shot examples: these demonstrate the multi-step array shape to the model,
 # not just describe it - schema enforcement alone wasn't reliable without this.
 FEWSHOT = [
+    ("fly forward 3 meters",
+     '{"plan": [{"action": "fly_forward", "params": {"distance": 3.0}}]}'),
+    ("go left 2 meters and hover for 4 seconds",
+     '{"plan": [{"action": "fly_left", "params": {"distance": 2.0}}, '
+     '{"action": "hover", "params": {"duration": 4.0}}]}'),
     ("hover for 2 seconds then land",
      '{"plan": [{"action": "hover", "params": {"duration": 2.0}}, '
      '{"action": "land", "params": {}}]}'),

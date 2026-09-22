@@ -62,6 +62,24 @@ class AirSimVehicleAdapter(VehicleAdapter):
         self.client.takeoffAsync(vehicle_name=self.vehicle_name).join()
         self.set_height(DEFAULT_HEIGHT)
 
+    # --- non-blocking primitives, for skills.py's polling loops ---
+
+    def get_position(self):
+        x, y = self.get_xy()
+        return (x, y, self.get_height())
+
+    def get_speed(self):
+        v = self.client.getMultirotorState(self.vehicle_name).kinematics_estimated.linear_velocity
+        return (v.x_val ** 2 + v.y_val ** 2 + v.z_val ** 2) ** 0.5
+
+    def start_move_to(self, x, y, z):
+        self.client.moveToPositionAsync(
+            x, y, self._to_ned(z), MOVE_SPEED, vehicle_name=self.vehicle_name,
+        )
+
+    def start_hover(self):
+        self.client.hoverAsync(vehicle_name=self.vehicle_name)
+
     # --- action executors, one per ActionType ---
 
     def fly_to(self, x, y, z):

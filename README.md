@@ -1,16 +1,6 @@
 # FICSAgenticDroneSim (individual build)
 
-**Repurposed 2026-09-12.** This repo previously held a from-scratch replication of
-`niranjanpillai2009-altr/AirSimRepo` (Niranjan's solo baseline) for the FICS Lab agentic-drone
-project, Dr. Akbas. That work is done, was reviewed, and stays fully available in this repo's git
-history - nothing was deleted, just moved on from.
-
-The team's actual project structure, clarified by Akbas: each member individually builds their own
-implementation of Phases 1-10 of the team's shared architecture
-(`AkbasLab/FICSAgenticDroneSim`), open-endedly - the team repo (and everyone's own prior work,
-including the replication above) is reference material, not a spec to copy. Best ideas across
-everyone's independent builds get combined at the weekly team meeting and on Discord. This repo is
-now that individual build, starting from Phase 1.
+This repo is now my individual build, starting from Phase 1.
 
 ## Status
 

@@ -11,6 +11,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from fics_drone.agents.belief import Belief
+from fics_drone.agents.belief_schema import MissionBelief, SelfState
 from fics_drone.agents.guardian import Guardian
 from fics_drone.agents.objectives import Objective, ReplanEvent
 from fics_drone.agents.persistent_agent import PersistentAgent
@@ -26,10 +27,12 @@ class TestSearchPolicy(unittest.TestCase):
     def setUp(self):
         self.policy = SearchAgentPolicy()
 
-    def _belief(self, phase, **kwargs):
-        defaults = dict(position=(0, 0, 0), elapsed_s=0.0, battery_s=100.0)
-        defaults.update(kwargs)
-        return Belief(phase=phase, **defaults)
+    def _belief(self, phase, position=(0, 0, 0), elapsed_s=0.0, battery_s=100.0,
+                nav_retries=0, search_queue=None):
+        b = Belief(self_state=SelfState(position=position, elapsed_s=elapsed_s, battery_s=battery_s,
+                                         phase=phase, nav_retries=nav_retries),
+                   mission=MissionBelief(sector_id="A", search_queue=search_queue or []))
+        return b
 
     def test_task_assigned_leads_to_takeoff(self):
         b = self._belief("pre_takeoff")

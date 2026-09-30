@@ -12,6 +12,7 @@ from typing import List, Tuple
 
 from ..control.skills import follow_waypoints, hold_position, return_home, take_off
 from ..core.scenario import Scenario, Sector, Target
+from ..core.skill_result import SkillStatus
 from ..evaluation.metrics import COVERAGE_RADIUS_M
 
 LANE_SPACING_M = COVERAGE_RADIUS_M * 1.2  # < 2*radius with real margin - 2*radius is only an
@@ -66,7 +67,12 @@ def run_scripted_mission(scenario: Scenario, adapters: dict, height: float = 8.0
     drone_index = {spec.name: i for i, spec in enumerate(scenario.drones)}
 
     def fly_one(name, adapter):
-        take_off(adapter)
+        result = take_off(adapter)
+        if result.status != SkillStatus.SUCCESS:
+            # No ground reference was ever recorded - every flight command past this
+            # point needs one, so there is nothing safe left to do with this drone.
+            print(f"{name}: takeoff failed ({result.error}) - aborting this drone, not flying it")
+            return
         spec = next(d for d in scenario.drones if d.name == name)
         sector = scenario.sector(spec.sector)
         # Each drone gets its own cruise altitude, distinct by ALTITUDE_STEP_M per

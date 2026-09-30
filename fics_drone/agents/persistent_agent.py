@@ -110,6 +110,13 @@ class PersistentAgent:
             event = self._execute(objective, trace)
             self.belief.elapsed_s = time.monotonic() - start
 
+            if objective == Objective.TAKE_OFF and event == ReplanEvent.SKILL_FAILED:
+                # No ground reference was ever recorded - RETURN_HOME/LAND both need
+                # one, so there is nothing safe left to command. Stop here, don't
+                # route through the normal failure path (which assumes airborne).
+                trace.append("takeoff_failed->aborted")
+                break
+
             idle_rounds = idle_rounds + 1 if objective == Objective.SEARCH_SECTOR and not self.belief.search_queue else 0
             if idle_rounds > MAX_IDLE_ROUNDS:
                 trace.append("idle_limit->return_home")

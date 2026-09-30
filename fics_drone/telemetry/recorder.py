@@ -52,7 +52,15 @@ class TelemetryRecorder:
         while not self._stop_event.is_set():
             t = time.monotonic() - self._start_time
             for name, adapter in self.adapters.items():
-                local = adapter.get_position()
+                try:
+                    local = adapter.get_position()
+                except Exception:
+                    # Most commonly: this drone hasn't finished connect_and_takeoff()
+                    # yet (no ground reference recorded), which is a normal transient
+                    # state early in a run, not a reason to kill sampling for every
+                    # drone for the rest of the mission. Skip this one tick for this
+                    # drone and try again next tick.
+                    continue
                 off = self.world_offsets[name]
                 world = (local[0] + off[0], local[1] + off[1], local[2] + off[2])
                 self.log[name].append(Sample(t, world))

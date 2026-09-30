@@ -20,25 +20,24 @@ from ..core.enums import ActionType
 from ..core.interfaces import VehicleAdapter
 
 # AirSim's Python client (msgpack-rpc over Tornado) has a known concurrency bug:
-# concurrent RPC calls from separate threads - even through separate client
-# instances - can corrupt Tornado's own write buffer ("BufferError: Existing
+# concurrent RPC calls against the SAME client instance from more than one
+# thread can corrupt Tornado's own write buffer ("BufferError: Existing
 # exports of data: object cannot be re-sized", or the same fault surfacing
-# inside Tornado's own IOLoop callback thread). Phase 2-3 never hit this (lower
-# call volume); Phase 4's telemetry recorder plus every drone's own skill-polling
-# loop pushed concurrent RPC traffic high enough to trigger it reliably.
+# inside Tornado's own IOLoop callback thread). This repo already gives each
+# vehicle its own client instance, but two separate threads still touch any
+# one drone's client concurrently: that drone's own flight thread (moving it,
+# polling its own arrival) AND the telemetry recorder thread (polling every
+# drone's position on its own timer). That overlap is the actual race.
 #
-# First attempt only locked the high-frequency reads (get_position/get_speed)
-# and left writes (moveToPositionAsync etc.) unlocked to preserve concurrent
-# flight - still crashed, because the corruption also happens inside Tornado's
-# own IOLoop thread, not just at the call site. Every RPC call - reads and
-# writes, including the blocking .join() calls, which themselves poll via more
-# RPC traffic - now goes through this one process-wide lock. Real cost: a
-# drone's takeoff or landing sequence (the only genuinely multi-second .join()
-# calls in the paths this repo actually exercises) briefly stalls other
-# drones' position polling while it holds the lock. Not a correctness problem
-# (30s skill timeout budget absorbs a few seconds of stall) - just slower than
-# true parallelism, which real reliability here is worth trading for.
-_CLIENT_LOCK = threading.Lock()
+# First attempt used ONE lock shared across all 4 drones - that stopped the
+# crash but wrecked responsiveness: every drone's poll loop now queued behind
+# the other three's RPC round-trips on every single check, so a drone could
+# sit well within its arrival tolerance for the full 30s skill timeout without
+# ever getting a fast-enough speed reading to confirm it had settled. The
+# actual conflict was never cross-drone - each drone's own client is only
+# ever touched by ITS OWN flight thread plus the recorder thread, never by
+# another drone's thread. A lock PER ADAPTER (see __init__) protects exactly
+# that real overlap, with zero unrelated contention between drones.
 
 # world-frame (x, y) unit direction per strafe action - heading is held fixed,
 # the drone strafes rather than turning to face its travel direction.
@@ -60,6 +59,8 @@ class AirSimVehicleAdapter(VehicleAdapter):
         self.client.enableApiControl(True, vehicle_name)
         self.client.armDisarm(True, vehicle_name)
         self._ground_ned = None  # set on connect_and_takeoff()
+        self._lock = threading.Lock()  # protects THIS drone's client from its own
+        # flight thread racing the telemetry recorder thread - see module docstring
 
     # --- the one NED boundary ---
 
@@ -74,7 +75,7 @@ class AirSimVehicleAdapter(VehicleAdapter):
         locked, and shared by every caller below, so get_position() no longer
         makes two separate RPC round-trips (get_xy() + get_height()) for what
         is one state read."""
-        with _CLIENT_LOCK:
+        with self._lock:
             return self.client.getMultirotorState(self.vehicle_name).kinematics_estimated.position
 
     def get_height(self) -> float:
@@ -88,7 +89,7 @@ class AirSimVehicleAdapter(VehicleAdapter):
 
     def connect_and_takeoff(self):
         self._ground_ned = self._get_position_ned().z_val  # recorded here - see the module docstring
-        with _CLIENT_LOCK:
+        with self._lock:
             self.client.takeoffAsync(vehicle_name=self.vehicle_name).join()
         self.set_height(DEFAULT_HEIGHT)  # locks internally
 
@@ -99,35 +100,35 @@ class AirSimVehicleAdapter(VehicleAdapter):
         return (pos.x_val, pos.y_val, self._from_ned(pos.z_val))
 
     def get_speed(self):
-        with _CLIENT_LOCK:
+        with self._lock:
             v = self.client.getMultirotorState(self.vehicle_name).kinematics_estimated.linear_velocity
         return (v.x_val ** 2 + v.y_val ** 2 + v.z_val ** 2) ** 0.5
 
     def start_move_to(self, x, y, z):
-        with _CLIENT_LOCK:
+        with self._lock:
             self.client.moveToPositionAsync(
                 x, y, self._to_ned(z), MOVE_SPEED, vehicle_name=self.vehicle_name,
             )
 
     def start_hover(self):
-        with _CLIENT_LOCK:
+        with self._lock:
             self.client.hoverAsync(vehicle_name=self.vehicle_name)
 
     # --- action executors, one per ActionType ---
-    # Every one of these holds _CLIENT_LOCK across its .join() too, not just the
+    # Every one of these holds self._lock across its .join() too, not just the
     # dispatch - .join() itself polls via more RPC calls, so releasing early would
-    # still let it race another drone's call mid-wait. See the module-level lock's
+    # still let it race the recorder thread's read mid-wait. See the module-level
     # comment for why this is needed at all.
 
     def fly_to(self, x, y, z):
-        with _CLIENT_LOCK:
+        with self._lock:
             self.client.moveToPositionAsync(
                 x, y, self._to_ned(z), MOVE_SPEED, vehicle_name=self.vehicle_name,
             ).join()
 
     def set_height(self, z):
         x, y = self.get_xy()
-        with _CLIENT_LOCK:
+        with self._lock:
             self.client.moveToPositionAsync(
                 x, y, self._to_ned(z), MOVE_SPEED, vehicle_name=self.vehicle_name,
             ).join()
@@ -136,14 +137,14 @@ class AirSimVehicleAdapter(VehicleAdapter):
         dx, dy = _DIRECTIONS[action]
         x, y = self.get_xy()
         target_z = self._get_position_ned().z_val
-        with _CLIENT_LOCK:
+        with self._lock:
             self.client.moveToPositionAsync(
                 x + dx * distance, y + dy * distance, target_z, MOVE_SPEED,
                 vehicle_name=self.vehicle_name,
             ).join()
 
     def hover(self, duration):
-        with _CLIENT_LOCK:
+        with self._lock:
             self.client.hoverAsync(vehicle_name=self.vehicle_name).join()
         import time
         time.sleep(duration)  # no RPC happening during the wait itself - don't hold the lock for it
@@ -154,7 +155,7 @@ class AirSimVehicleAdapter(VehicleAdapter):
         where impact speed matters, get the slow speed."""
         x, y = self.get_xy()
         fast_target_ned = self._to_ned(LAND_FAST_ABOVE)
-        with _CLIENT_LOCK:
+        with self._lock:
             self.client.moveToPositionAsync(
                 x, y, fast_target_ned, LAND_FAST_SPEED, vehicle_name=self.vehicle_name,
             ).join()
@@ -162,7 +163,7 @@ class AirSimVehicleAdapter(VehicleAdapter):
         import time
         time.sleep(LAND_SETTLE_SECS)
 
-        with _CLIENT_LOCK:
+        with self._lock:
             self.client.moveToPositionAsync(
                 x, y, self._ground_ned, LAND_SLOW_SPEED, vehicle_name=self.vehicle_name,
             ).join()

@@ -10,12 +10,25 @@ connect_and_takeoff() again while still airborne would treat the current
 altitude as ground level, and a later land() would disarm mid-air.
 """
 
+import threading
+
 from ..control.navigation import (
     DEFAULT_HEIGHT, LAND_FAST_ABOVE, LAND_FAST_SPEED, LAND_SETTLE_SECS,
     LAND_SLOW_SPEED, MOVE_SPEED,
 )
 from ..core.enums import ActionType
 from ..core.interfaces import VehicleAdapter
+
+# AirSim's Python client (msgpack-rpc over Tornado) has a known concurrency bug:
+# concurrent RPC calls from separate threads - even through separate client
+# instances - can hit "BufferError: Existing exports of data: object cannot be
+# re-sized" in the underlying pack/write path. Phase 2-3 never hit this (lower
+# call volume); Phase 4's telemetry recorder plus every drone's own skill-polling
+# loop pushed concurrent read-call frequency high enough to trigger it. Fix:
+# serialize just the high-frequency state reads behind one process-wide lock -
+# movement commands (moveToPositionAsync etc.) stay unlocked, so drones still
+# fly concurrently; only the position/speed queries get serialized.
+_CLIENT_LOCK = threading.Lock()
 
 # world-frame (x, y) unit direction per strafe action - heading is held fixed,
 # the drone strafes rather than turning to face its travel direction.
@@ -46,30 +59,37 @@ class AirSimVehicleAdapter(VehicleAdapter):
     def _from_ned(self, z_ned: float) -> float:
         return self._ground_ned - z_ned
 
+    def _get_position_ned(self):
+        """The one place getMultirotorState() is called for a raw position -
+        locked, and shared by every caller below, so get_position() no longer
+        makes two separate RPC round-trips (get_xy() + get_height()) for what
+        is one state read."""
+        with _CLIENT_LOCK:
+            return self.client.getMultirotorState(self.vehicle_name).kinematics_estimated.position
+
     def get_height(self) -> float:
-        pos = self.client.getMultirotorState(self.vehicle_name).kinematics_estimated.position
-        return self._from_ned(pos.z_val)
+        return self._from_ned(self._get_position_ned().z_val)
 
     def get_xy(self):
-        pos = self.client.getMultirotorState(self.vehicle_name).kinematics_estimated.position
+        pos = self._get_position_ned()
         return pos.x_val, pos.y_val
 
     # --- lifecycle ---
 
     def connect_and_takeoff(self):
-        pos = self.client.getMultirotorState(self.vehicle_name).kinematics_estimated.position
-        self._ground_ned = pos.z_val  # recorded here - see the module docstring
+        self._ground_ned = self._get_position_ned().z_val  # recorded here - see the module docstring
         self.client.takeoffAsync(vehicle_name=self.vehicle_name).join()
         self.set_height(DEFAULT_HEIGHT)
 
     # --- non-blocking primitives, for skills.py's polling loops ---
 
     def get_position(self):
-        x, y = self.get_xy()
-        return (x, y, self.get_height())
+        pos = self._get_position_ned()
+        return (pos.x_val, pos.y_val, self._from_ned(pos.z_val))
 
     def get_speed(self):
-        v = self.client.getMultirotorState(self.vehicle_name).kinematics_estimated.linear_velocity
+        with _CLIENT_LOCK:
+            v = self.client.getMultirotorState(self.vehicle_name).kinematics_estimated.linear_velocity
         return (v.x_val ** 2 + v.y_val ** 2 + v.z_val ** 2) ** 0.5
 
     def start_move_to(self, x, y, z):
@@ -96,8 +116,7 @@ class AirSimVehicleAdapter(VehicleAdapter):
     def _strafe(self, action, distance):
         dx, dy = _DIRECTIONS[action]
         x, y = self.get_xy()
-        target_z = self.client.getMultirotorState(
-            self.vehicle_name).kinematics_estimated.position.z_val
+        target_z = self._get_position_ned().z_val
         self.client.moveToPositionAsync(
             x + dx * distance, y + dy * distance, target_z, MOVE_SPEED,
             vehicle_name=self.vehicle_name,

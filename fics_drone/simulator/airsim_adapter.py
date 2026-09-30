@@ -21,13 +21,23 @@ from ..core.interfaces import VehicleAdapter
 
 # AirSim's Python client (msgpack-rpc over Tornado) has a known concurrency bug:
 # concurrent RPC calls from separate threads - even through separate client
-# instances - can hit "BufferError: Existing exports of data: object cannot be
-# re-sized" in the underlying pack/write path. Phase 2-3 never hit this (lower
+# instances - can corrupt Tornado's own write buffer ("BufferError: Existing
+# exports of data: object cannot be re-sized", or the same fault surfacing
+# inside Tornado's own IOLoop callback thread). Phase 2-3 never hit this (lower
 # call volume); Phase 4's telemetry recorder plus every drone's own skill-polling
-# loop pushed concurrent read-call frequency high enough to trigger it. Fix:
-# serialize just the high-frequency state reads behind one process-wide lock -
-# movement commands (moveToPositionAsync etc.) stay unlocked, so drones still
-# fly concurrently; only the position/speed queries get serialized.
+# loop pushed concurrent RPC traffic high enough to trigger it reliably.
+#
+# First attempt only locked the high-frequency reads (get_position/get_speed)
+# and left writes (moveToPositionAsync etc.) unlocked to preserve concurrent
+# flight - still crashed, because the corruption also happens inside Tornado's
+# own IOLoop thread, not just at the call site. Every RPC call - reads and
+# writes, including the blocking .join() calls, which themselves poll via more
+# RPC traffic - now goes through this one process-wide lock. Real cost: a
+# drone's takeoff or landing sequence (the only genuinely multi-second .join()
+# calls in the paths this repo actually exercises) briefly stalls other
+# drones' position polling while it holds the lock. Not a correctness problem
+# (30s skill timeout budget absorbs a few seconds of stall) - just slower than
+# true parallelism, which real reliability here is worth trading for.
 _CLIENT_LOCK = threading.Lock()
 
 # world-frame (x, y) unit direction per strafe action - heading is held fixed,
@@ -78,8 +88,9 @@ class AirSimVehicleAdapter(VehicleAdapter):
 
     def connect_and_takeoff(self):
         self._ground_ned = self._get_position_ned().z_val  # recorded here - see the module docstring
-        self.client.takeoffAsync(vehicle_name=self.vehicle_name).join()
-        self.set_height(DEFAULT_HEIGHT)
+        with _CLIENT_LOCK:
+            self.client.takeoffAsync(vehicle_name=self.vehicle_name).join()
+        self.set_height(DEFAULT_HEIGHT)  # locks internally
 
     # --- non-blocking primitives, for skills.py's polling loops ---
 
@@ -93,39 +104,49 @@ class AirSimVehicleAdapter(VehicleAdapter):
         return (v.x_val ** 2 + v.y_val ** 2 + v.z_val ** 2) ** 0.5
 
     def start_move_to(self, x, y, z):
-        self.client.moveToPositionAsync(
-            x, y, self._to_ned(z), MOVE_SPEED, vehicle_name=self.vehicle_name,
-        )
+        with _CLIENT_LOCK:
+            self.client.moveToPositionAsync(
+                x, y, self._to_ned(z), MOVE_SPEED, vehicle_name=self.vehicle_name,
+            )
 
     def start_hover(self):
-        self.client.hoverAsync(vehicle_name=self.vehicle_name)
+        with _CLIENT_LOCK:
+            self.client.hoverAsync(vehicle_name=self.vehicle_name)
 
     # --- action executors, one per ActionType ---
+    # Every one of these holds _CLIENT_LOCK across its .join() too, not just the
+    # dispatch - .join() itself polls via more RPC calls, so releasing early would
+    # still let it race another drone's call mid-wait. See the module-level lock's
+    # comment for why this is needed at all.
 
     def fly_to(self, x, y, z):
-        self.client.moveToPositionAsync(
-            x, y, self._to_ned(z), MOVE_SPEED, vehicle_name=self.vehicle_name,
-        ).join()
+        with _CLIENT_LOCK:
+            self.client.moveToPositionAsync(
+                x, y, self._to_ned(z), MOVE_SPEED, vehicle_name=self.vehicle_name,
+            ).join()
 
     def set_height(self, z):
         x, y = self.get_xy()
-        self.client.moveToPositionAsync(
-            x, y, self._to_ned(z), MOVE_SPEED, vehicle_name=self.vehicle_name,
-        ).join()
+        with _CLIENT_LOCK:
+            self.client.moveToPositionAsync(
+                x, y, self._to_ned(z), MOVE_SPEED, vehicle_name=self.vehicle_name,
+            ).join()
 
     def _strafe(self, action, distance):
         dx, dy = _DIRECTIONS[action]
         x, y = self.get_xy()
         target_z = self._get_position_ned().z_val
-        self.client.moveToPositionAsync(
-            x + dx * distance, y + dy * distance, target_z, MOVE_SPEED,
-            vehicle_name=self.vehicle_name,
-        ).join()
+        with _CLIENT_LOCK:
+            self.client.moveToPositionAsync(
+                x + dx * distance, y + dy * distance, target_z, MOVE_SPEED,
+                vehicle_name=self.vehicle_name,
+            ).join()
 
     def hover(self, duration):
-        self.client.hoverAsync(vehicle_name=self.vehicle_name).join()
+        with _CLIENT_LOCK:
+            self.client.hoverAsync(vehicle_name=self.vehicle_name).join()
         import time
-        time.sleep(duration)
+        time.sleep(duration)  # no RPC happening during the wait itself - don't hold the lock for it
 
     def land(self):
         """Fast descent to LAND_FAST_ABOVE, settle, slow final approach, disarm.
@@ -133,19 +154,20 @@ class AirSimVehicleAdapter(VehicleAdapter):
         where impact speed matters, get the slow speed."""
         x, y = self.get_xy()
         fast_target_ned = self._to_ned(LAND_FAST_ABOVE)
-        self.client.moveToPositionAsync(
-            x, y, fast_target_ned, LAND_FAST_SPEED, vehicle_name=self.vehicle_name,
-        ).join()
-
-        self.client.hoverAsync(vehicle_name=self.vehicle_name).join()
+        with _CLIENT_LOCK:
+            self.client.moveToPositionAsync(
+                x, y, fast_target_ned, LAND_FAST_SPEED, vehicle_name=self.vehicle_name,
+            ).join()
+            self.client.hoverAsync(vehicle_name=self.vehicle_name).join()
         import time
         time.sleep(LAND_SETTLE_SECS)
 
-        self.client.moveToPositionAsync(
-            x, y, self._ground_ned, LAND_SLOW_SPEED, vehicle_name=self.vehicle_name,
-        ).join()
-        self.client.landAsync(vehicle_name=self.vehicle_name).join()
-        self.client.armDisarm(False, self.vehicle_name)
+        with _CLIENT_LOCK:
+            self.client.moveToPositionAsync(
+                x, y, self._ground_ned, LAND_SLOW_SPEED, vehicle_name=self.vehicle_name,
+            ).join()
+            self.client.landAsync(vehicle_name=self.vehicle_name).join()
+            self.client.armDisarm(False, self.vehicle_name)
 
     # --- run a validated plan ---
 

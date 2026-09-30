@@ -8,9 +8,9 @@
   "required_coverage": 0.95,
   "drones": [
     { "name": "Drone1", "battery_s": 300.0, "sector": "A", "spawn_offset": [0.0, 0.0, 0.0] },
-    { "name": "Drone2", "battery_s": 300.0, "sector": "B", "spawn_offset": [20.0, 0.0, 0.0] },
-    { "name": "Drone3", "battery_s": 300.0, "sector": "C", "spawn_offset": [40.0, 0.0, 0.0] },
-    { "name": "Drone4", "battery_s": 300.0, "sector": "D", "spawn_offset": [60.0, 0.0, 0.0] }
+    { "name": "Drone2", "battery_s": 300.0, "sector": "B", "spawn_offset": [0.0, 20.0, 0.0] },
+    { "name": "Drone3", "battery_s": 300.0, "sector": "C", "spawn_offset": [20.0, 0.0, 0.0] },
+    { "name": "Drone4", "battery_s": 300.0, "sector": "D", "spawn_offset": [-20.0, 0.0, 0.0] }
   ],
   "sectors": [
     { "id": "A", "x_min": 20.0, "x_max": 40.0, "y_min": 20.0, "y_max": 40.0 },

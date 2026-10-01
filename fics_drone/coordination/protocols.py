@@ -18,6 +18,8 @@ from typing import Any, Dict, List, Optional
 class MessageType(str, Enum):
     HEARTBEAT = "heartbeat"       # periodic self-report: position, battery
     TARGET_FOUND = "target_found"  # broadcast once a sighting is confirmed
+    TASK_BID = "task_bid"         # Phase 8: this agent's bid on a sector task
+    TASK_CLAIM = "task_claim"     # Phase 8: this agent believes it won a task
 
 
 # Must exceed the longest skill this message's sender might be mid-skill
@@ -28,6 +30,8 @@ class MessageType(str, Enum):
 TTL_BY_TYPE = {
     MessageType.HEARTBEAT: 60.0,
     MessageType.TARGET_FOUND: 300.0,
+    MessageType.TASK_BID: 30.0,
+    MessageType.TASK_CLAIM: 300.0,
 }
 
 BROADCAST = None  # Message.recipients=None means "every other registered agent"

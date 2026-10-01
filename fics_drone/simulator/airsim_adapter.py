@@ -200,7 +200,8 @@ class AirSimVehicleAdapter(VehicleAdapter):
 
     def hover(self, duration):
         with self._lock:
-            self.client.hoverAsync(vehicle_name=self.vehicle_name).join()
+            _with_timeout(lambda: self.client.hoverAsync(vehicle_name=self.vehicle_name).join(),
+                           MOVE_TIMEOUT_S)
         import time
         time.sleep(duration)  # no RPC happening during the wait itself - don't hold the lock for it
 
@@ -215,7 +216,11 @@ class AirSimVehicleAdapter(VehicleAdapter):
                 x, y, fast_target_ned, LAND_FAST_SPEED, vehicle_name=self.vehicle_name,
                 timeout_sec=MOVE_TIMEOUT_S,
             ).join()
-            self.client.hoverAsync(vehicle_name=self.vehicle_name).join()
+            # hoverAsync has NO timeout_sec parameter at all (checked directly against the
+            # installed airsim client) - unlike every move/land/takeoff command, there is no
+            # native way to bound this one. Watchdog it like the raw state reads above.
+            _with_timeout(lambda: self.client.hoverAsync(vehicle_name=self.vehicle_name).join(),
+                           MOVE_TIMEOUT_S)
         import time
         time.sleep(LAND_SETTLE_SECS)
 
@@ -225,7 +230,8 @@ class AirSimVehicleAdapter(VehicleAdapter):
                 timeout_sec=MOVE_TIMEOUT_S,
             ).join()
             self.client.landAsync(vehicle_name=self.vehicle_name, timeout_sec=60).join()
-            self.client.armDisarm(False, self.vehicle_name)
+            # armDisarm is also a plain synchronous call with no timeout concept at all.
+            _with_timeout(lambda: self.client.armDisarm(False, self.vehicle_name), RPC_READ_TIMEOUT_S)
 
     # --- run a validated plan ---
 

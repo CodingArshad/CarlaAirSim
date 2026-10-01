@@ -42,9 +42,16 @@ def _join_all(threads, names):
 
 
 def run_team_threaded(scenario: Scenario, adapters: Dict[str, object], bus: MessageBus = None,
-                       loggers: Dict[str, DecisionLogger] = None) -> Dict[str, AgentReport]:
+                       loggers: Dict[str, DecisionLogger] = None,
+                       comms_estimators: Dict[str, "CommsEstimator"] = None) -> Dict[str, AgentReport]:
     """Static assignment (scenario's own spec.sector), Phase 7 behavior -
-    unchanged, still used where a fixed assignment is what's wanted."""
+    unchanged, still used where a fixed assignment is what's wanted. Phase 10
+    uses this one (not run_team_with_allocation) for the comms study, on
+    purpose: assignment stays fixed regardless of message loss, so a degraded
+    bus tests Phase 7's messaging protocol in isolation rather than
+    confounding it with Phase 8's contract-net bidding, which depends on
+    messages of its own and would otherwise fail to even finish allocating
+    under `severe` - a real, separate finding, not what Phase 10 is about."""
     bus = bus or MessageBus()
     reports: Dict[str, AgentReport] = {}
     agents: Dict[str, PersistentAgent] = {}
@@ -53,8 +60,10 @@ def run_team_threaded(scenario: Scenario, adapters: Dict[str, object], bus: Mess
         adapter = adapters[spec.name]
         link = AgentLink(bus, spec.name)
         logger = loggers.get(spec.name) if loggers else None
+        estimator = comms_estimators.get(spec.name) if comms_estimators else None
         agents[spec.name] = PersistentAgent(adapter, scenario, spec.sector, spec.spawn_offset,
-                                             spec.battery_s, logger=logger, drone_name=spec.name, link=link)
+                                             spec.battery_s, logger=logger, drone_name=spec.name, link=link,
+                                             comms_estimator=estimator)
 
     def fly_one(name):
         reports[name] = agents[name].run()
@@ -100,9 +109,15 @@ def allocate_sectors(scenario: Scenario, links: Dict[str, AgentLink]) -> Dict[st
 
 
 def run_team_with_allocation(scenario: Scenario, adapters: Dict[str, object], bus: MessageBus = None,
-                              loggers: Dict[str, DecisionLogger] = None):
+                              loggers: Dict[str, DecisionLogger] = None,
+                              comms_estimators: Dict[str, "CommsEstimator"] = None):
     """Phase 8 exit criterion: the team divides sectors itself, no central
-    assignment - then flies using whatever each drone actually won."""
+    assignment - then flies using whatever each drone actually won.
+
+    Phase 10: `bus` carrying a NetworkModel degrades delivery; passing
+    `comms_estimators` gives each agent its own CommsEstimator, fed every
+    delivered message, so a caller (run_comms_study.py) can read back each
+    agent's own inferred view of link quality after the run."""
     bus = bus or MessageBus()
     links = {spec.name: AgentLink(bus, spec.name) for spec in scenario.drones}
 
@@ -115,9 +130,10 @@ def run_team_with_allocation(scenario: Scenario, adapters: Dict[str, object], bu
         if sector_id is None:
             continue  # didn't win anything - nothing to fly
         logger = loggers.get(spec.name) if loggers else None
+        estimator = comms_estimators.get(spec.name) if comms_estimators else None
         agents[spec.name] = PersistentAgent(adapters[spec.name], scenario, sector_id, spec.spawn_offset,
                                              spec.battery_s, logger=logger, drone_name=spec.name,
-                                             link=links[spec.name])
+                                             link=links[spec.name], comms_estimator=estimator)
 
     def fly_one(name):
         reports[name] = agents[name].run()

@@ -25,6 +25,7 @@ from ..core.skill_result import SkillStatus
 from ..experiments.mission_runner import lawnmower_waypoints
 from .belief import Belief, SearchLeg
 from .belief_schema import MissionBelief, Provenance, SelfState, TargetSighting, TeammateRecord
+from .comms_estimator import CommsEstimator
 from .decision_log import DecisionLogger
 from .ground_truth import SensorModel
 from .guardian import Guardian
@@ -83,7 +84,7 @@ class PersistentAgent:
                  cruise_height: float = DEFAULT_HEIGHT, logger: DecisionLogger = None,
                  drone_name: str = "drone", link: AgentLink = None,
                  task_board: TaskBoard = None, health_monitor: HealthMonitor = None,
-                 kill_at_s: Optional[float] = None):
+                 kill_at_s: Optional[float] = None, comms_estimator: CommsEstimator = None):
         self.adapter = adapter
         self.scenario = scenario
         self.sector = scenario.sector(sector_id)
@@ -102,6 +103,9 @@ class PersistentAgent:
         self.kill_at_s = kill_at_s  # fault-injection hook for testing failure recovery - simulates
         # a drone going silent (no flight, no sensing, no heartbeats, nobody told), never used in
         # a real mission
+        self.comms_estimator = comms_estimator  # Phase 10: this agent's own inferred view of link
+        # quality per teammate, built only from messages that actually arrived - never given access
+        # to the NetworkModel/NetworkProfile that's actually degrading the link
         self.belief = Belief(
             self_state=SelfState(position=(0.0, 0.0, 0.0), elapsed_s=0.0, battery_s=battery_s),
             mission=MissionBelief(sector_id=sector_id,
@@ -252,6 +256,8 @@ class PersistentAgent:
         if not self.link:
             return
         for msg in self.link.receive_available():
+            if self.comms_estimator:
+                self.comms_estimator.observe(msg, self.belief.elapsed_s)
             if msg.type == MessageType.TARGET_FOUND:
                 target_id = msg.payload["target_id"]
                 if target_id not in self.belief.mission.targets_known:

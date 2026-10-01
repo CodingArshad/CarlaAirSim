@@ -51,6 +51,9 @@ class Message:
     ttl_s: float
     payload: Dict[str, Any] = field(default_factory=dict)
     confidence: float = 1.0
+    seq: int = 0  # Phase 10: per-sender monotonic counter, assigned by MessageBus -
+    # the only way a receiver can notice a gap (a message that never arrived at all,
+    # distinct from one that arrived late) without being told the drop rate directly
 
     def expires_at(self) -> float:
         return self.created_t + self.ttl_s

@@ -68,6 +68,14 @@ class Belief:
         self.self_state.nav_retries = value
 
     @property
+    def listen_rounds(self):
+        return self.self_state.listen_rounds
+
+    @listen_rounds.setter
+    def listen_rounds(self, value):
+        self.self_state.listen_rounds = value
+
+    @property
     def battery_frac_remaining(self) -> float:
         return self.self_state.battery_frac_remaining
 

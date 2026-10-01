@@ -1,0 +1,48 @@
+"""One common envelope for every message, so ordering, expiry, addressing and
+logging are implemented once, not per message type.
+
+Scope note: FICS's own Phase 7 builds 13 message types. This build scopes
+down to the two this mission's exit criterion actually needs -
+TARGET_FOUND (the thing that has to propagate between agents) and HEARTBEAT
+(exercises the TeamBelief/Provenance scaffolding Phase 6 built but left
+dormant, since there was no second agent to have beliefs about yet). Task
+bidding, role reassignment, and failure-recovery messages are real Phase 8-9
+concerns, not invented early here.
+"""
+
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Dict, List, Optional
+
+
+class MessageType(str, Enum):
+    HEARTBEAT = "heartbeat"       # periodic self-report: position, battery
+    TARGET_FOUND = "target_found"  # broadcast once a sighting is confirmed
+
+
+# Must exceed the longest skill this message's sender might be mid-skill
+# during - FICS's own Phase 7 doc flags this exact mistake (a TTL shorter
+# than a ~70s sweep aged out messages before anyone next checked their
+# inbox, showing up as false "drops"). Our own live Phase 5 run took up to
+# ~218s end to end, so these are set generously rather than guessed.
+TTL_BY_TYPE = {
+    MessageType.HEARTBEAT: 60.0,
+    MessageType.TARGET_FOUND: 300.0,
+}
+
+BROADCAST = None  # Message.recipients=None means "every other registered agent"
+
+
+@dataclass
+class Message:
+    id: int
+    type: MessageType
+    sender: str
+    recipients: Optional[List[str]]  # None = BROADCAST
+    created_t: float
+    ttl_s: float
+    payload: Dict[str, Any] = field(default_factory=dict)
+    confidence: float = 1.0
+
+    def expires_at(self) -> float:
+        return self.created_t + self.ttl_s

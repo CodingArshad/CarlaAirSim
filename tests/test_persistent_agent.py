@@ -59,8 +59,18 @@ class TestSearchPolicy(unittest.TestCase):
         objective, phase = self.policy.decide(b, ReplanEvent.REPORT_SENT)
         self.assertEqual(objective, Objective.RETURN_HOME)
 
-    def test_empty_search_queue_leads_to_return_home(self):
+    def test_empty_search_queue_leads_to_listening_first(self):
+        """Phase 7: an agent with nothing left to search lingers a few rounds
+        for a late teammate broadcast before heading home, instead of
+        leaving the instant its own work is done."""
         b = self._belief("searching", search_queue=[])
+        objective, phase = self.policy.decide(b, ReplanEvent.SKILL_SUCCEEDED)
+        self.assertEqual(objective, Objective.LISTEN)
+        self.assertEqual(phase, "listening")
+
+    def test_listening_returns_home_after_enough_rounds(self):
+        b = self._belief("listening")
+        b.self_state.listen_rounds = self.policy.listen_rounds
         objective, phase = self.policy.decide(b, ReplanEvent.SKILL_SUCCEEDED)
         self.assertEqual(objective, Objective.RETURN_HOME)
 

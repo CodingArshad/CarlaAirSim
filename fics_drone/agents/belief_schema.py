@@ -25,6 +25,7 @@ class SelfState:
     battery_s: float
     phase: str = "pre_takeoff"
     nav_retries: int = 0
+    listen_rounds: int = 0  # Phase 7: how many times this agent has lingered post-search for messages
 
     @property
     def battery_frac_remaining(self) -> float:
@@ -35,11 +36,16 @@ class SelfState:
 
 @dataclass
 class TargetSighting:
-    """What THIS agent sensed - never the scenario's own Target instance."""
+    """What THIS agent knows about a target - never the scenario's own Target
+    instance. source distinguishes a real sensor reading from this agent's
+    own flight (Phase 6) from a teammate's TARGET_FOUND broadcast (Phase 7) -
+    FICS's own exit criterion requires a drone that never visited a target's
+    sector to still be able to say it only knows about it second-hand."""
     target_id: str
     local_position: Tuple[float, float, float]
     first_seen_t: float
     confirmed: bool = False  # True once held long enough to count as reported
+    source: str = "sensor"   # "sensor" | "message"
 
 
 @dataclass

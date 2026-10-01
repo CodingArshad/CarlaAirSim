@@ -10,6 +10,9 @@ class Objective(str, Enum):
     GO_TO_SECTOR = "go_to_sector"
     SEARCH_SECTOR = "search_sector"
     REPORT = "report"
+    LISTEN = "listen"  # Phase 7: sector fully swept, nothing of its own left to do - lingers
+    # briefly to catch a late-arriving TARGET_FOUND from a teammate before heading home, instead
+    # of heading home the instant its own work ends and missing a report that was en route
     RETURN_HOME = "return_home"
     LAND = "land"
     DONE = "done"

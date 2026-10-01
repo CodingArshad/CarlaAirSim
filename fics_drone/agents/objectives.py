@@ -32,3 +32,5 @@ class ReplanEvent(str, Enum):
     BATTERY_CRITICAL = "battery_critical"
     GUARDIAN_BLOCKED = "guardian_blocked"
     NEW_TASK_ASSIGNED = "new_task_assigned"  # Phase 9: picked up an orphaned teammate's task
+    GUARDIAN_ESCALATED = "guardian_escalated"  # Phase 11: the guardian stopped asking and flew/
+    # landed the aircraft itself after repeated unsafe proposals - mission ends here, terminally

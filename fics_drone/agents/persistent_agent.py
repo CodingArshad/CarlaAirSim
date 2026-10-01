@@ -11,7 +11,7 @@ import time
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
-from ..control.navigation import DEFAULT_HEIGHT
+from ..control.navigation import DEFAULT_HEIGHT, SKILL_TIMEOUT_S
 from ..control.skills import go_to_waypoint, hold_position, land, take_off
 from ..coordination.bidding import DEFAULT_WEIGHTS, compute_bid
 from ..coordination.message_bus import AgentLink
@@ -22,14 +22,15 @@ from ..coordination.tasks import TaskBoard, TaskStatus
 from ..core.interfaces import VehicleAdapter
 from ..core.scenario import Scenario, Sector
 from ..core.skill_result import SkillStatus
+from ..experiments.guardian_log import GuardianLog
 from ..experiments.mission_runner import lawnmower_waypoints
 from .belief import Belief, SearchLeg
 from .belief_schema import MissionBelief, Provenance, SelfState, TargetSighting, TeammateRecord
 from .comms_estimator import CommsEstimator
 from .decision_log import DecisionLogger
 from .ground_truth import SensorModel
-from .guardian import Guardian
 from .objectives import Objective, ReplanEvent
+from .safety_guardian import Command, GuardianOutcome, SafetyGuardian, SafetyLimits
 from .search_policy import SearchAgentPolicy
 
 MAX_STEPS = 500  # hard backstop against a future undiscovered infinite-loop bug in the policy -
@@ -80,7 +81,7 @@ class AgentReport:
 class PersistentAgent:
     def __init__(self, adapter: VehicleAdapter, scenario: Scenario, sector_id: str,
                  spawn_offset: Tuple[float, float, float], battery_s: float,
-                 policy: SearchAgentPolicy = None, guardian: Guardian = None,
+                 policy: SearchAgentPolicy = None, guardian: SafetyGuardian = None,
                  cruise_height: float = DEFAULT_HEIGHT, logger: DecisionLogger = None,
                  drone_name: str = "drone", link: AgentLink = None,
                  task_board: TaskBoard = None, health_monitor: HealthMonitor = None,
@@ -91,7 +92,11 @@ class PersistentAgent:
         self.spawn_offset = spawn_offset
         self.cruise_height = cruise_height
         self.policy = policy or SearchAgentPolicy()
-        self.guardian = guardian or Guardian(scenario.no_fly_zones)
+        # Phase 11: SafetyGuardian supersedes Phase 5's Guardian (no-fly-zones only,
+        # binary pass/fail) as the default - Guardian itself is untouched, still its
+        # own class with its own tests, just no longer what a real agent flies with.
+        self.guardian = guardian or SafetyGuardian(limits=SafetyLimits.from_scenario(scenario))
+        self.guardian_log = GuardianLog()
         self.sensor = SensorModel(scenario)  # the ONLY thing here allowed to read scenario.targets
         self.logger = logger
         self.drone_name = drone_name
@@ -167,6 +172,13 @@ class PersistentAgent:
             event = self._execute(objective, trace)
             self.belief.elapsed_s = time.monotonic() - start
 
+            if event == ReplanEvent.GUARDIAN_ESCALATED:
+                # The guardian stopped asking and flew/landed the aircraft itself -
+                # already a terminal, already-safe outcome, nothing left for the
+                # policy to decide. See safety_guardian.py's sticky `escalated` flag.
+                trace.append("guardian_escalated->mission_terminated")
+                break
+
             if objective == Objective.TAKE_OFF and event == ReplanEvent.SKILL_FAILED:
                 # No ground reference was ever recorded - RETURN_HOME/LAND both need
                 # one, so there is nothing safe left to command. Stop here, don't
@@ -237,7 +249,7 @@ class PersistentAgent:
             return self._check_for_orphans()
 
         if objective == Objective.RETURN_HOME:
-            return self._guarded_fly((0.0, 0.0, DEFAULT_HEIGHT), trace)
+            return self._guarded_fly((0.0, 0.0, DEFAULT_HEIGHT), trace, purpose="home")
 
         if objective == Objective.LAND:
             result = land(self.adapter)
@@ -337,14 +349,45 @@ class PersistentAgent:
                 return ReplanEvent.TARGET_DETECTED
         return ReplanEvent.SKILL_SUCCEEDED
 
-    def _guarded_fly(self, local_target: Tuple[float, float, float], trace: List[str]) -> ReplanEvent:
+    def _guarded_fly(self, local_target: Tuple[float, float, float], trace: List[str],
+                      purpose: str = "mission") -> ReplanEvent:
+        """Every proposed flight target goes through the SafetyGuardian before
+        reaching the vehicle - the policy proposes, the guardian disposes.
+        `purpose="home"` (RETURN_HOME) exempts battery_reserve/separation, which
+        would otherwise block the exact recovery move a low-battery drone needs
+        most, or fire on every mission's own ending (every drone here returns to
+        the same shared home point, so teammates converging there is expected,
+        not a near-miss). speed_mps is read from the adapter when it exposes one
+        (KinematicMockVehicleAdapter does; AirSimVehicleAdapter doesn't expose a
+        fixed cruise speed the way this architecture is built) - a real per-
+        command speed proposal doesn't exist here the way FICS's own does, so
+        this check is honest about what it can and can't see, not faked."""
         world_target = _to_world(local_target, self.spawn_offset)
-        allowed, reason = self.guardian.check(world_target)
-        if not allowed:
-            trace.append(f"guardian_blocked({reason})")
+        command = Command(kind="fly", target=world_target, purpose=purpose,
+                           speed_mps=getattr(self.adapter, "speed_mps", 0.0), timeout_s=SKILL_TIMEOUT_S)
+        evaluation = self.guardian.evaluate(command, self.belief)
+        self.guardian_log.record(len(self.guardian_log.entries), command, evaluation)
+
+        if evaluation.outcome == GuardianOutcome.REJECT_AND_REPLAN:
+            trace.append(f"guardian_blocked({evaluation.reason})")
             return ReplanEvent.GUARDIAN_BLOCKED
-        result = go_to_waypoint(self.adapter, *local_target)
+
+        if evaluation.outcome == GuardianOutcome.EXECUTE_SAFE_FALLBACK:
+            trace.append(f"guardian_escalated({evaluation.fallback.value}: {evaluation.reason})")
+            if evaluation.command.kind == "land":
+                result = land(self.adapter)
+            else:
+                result = go_to_waypoint(self.adapter, *_to_local(evaluation.command.target, self.spawn_offset))
+            self.belief.position = result.final_position or self.belief.position
+            self.guardian.command_completed()
+            return ReplanEvent.GUARDIAN_ESCALATED
+
+        # APPROVE or APPROVE_WITH_MODIFICATION - fly whatever the guardian actually approved,
+        # which may differ from what was proposed (e.g. altitude clamped into the envelope).
+        final_local = _to_local(evaluation.command.target, self.spawn_offset)
+        result = go_to_waypoint(self.adapter, *final_local)
         self.belief.position = result.final_position or self.belief.position
+        self.guardian.command_completed()
         if result.status == SkillStatus.SUCCESS:
             # Every successful flight command sends a heartbeat - GO_TO_SECTOR,
             # SEARCH_SECTOR legs, and RETURN_HOME all go through here, covering nearly

@@ -50,9 +50,20 @@ def main():
         killed = " (KILLED)" if name == args.kill and "killed" in (report.trace[-1] if report.trace else "") else ""
         print(f"{name}{killed}: target_found={report.target_found} battery_frac={report.battery_frac_at_end:.2f}")
 
-    sectors_done = {agents[n].belief.mission.sector_id for n, r in reports.items()
-                    if r.trace and "killed" not in r.trace[-1]}
-    print(f"\nsectors completed: {len(sectors_done)}/{len(scenario.sectors)}")
+    # Union of TaskStatus.COMPLETE across every survivor's own board, not any one
+    # survivor's board and not any agent's final sector_id - same lesson the Phase 9
+    # integration test needed 2 rounds of debugging to land on (final sector_id only
+    # shows the LAST sector an agent worked, and one agent's board is frozen at
+    # whatever it last observed before it stopped listening).
+    from fics_drone.coordination.tasks import TaskStatus
+    completed_sector_ids = set()
+    for n in agents:
+        if n == args.kill:
+            continue
+        for t in agents[n].task_board.tasks.values():
+            if t.status == TaskStatus.COMPLETE:
+                completed_sector_ids.add(t.sector_id)
+    print(f"\nsectors completed: {len(completed_sector_ids)}/{len(scenario.sectors)} {sorted(completed_sector_ids)}")
 
 
 if __name__ == "__main__":

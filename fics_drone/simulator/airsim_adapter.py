@@ -10,6 +10,7 @@ connect_and_takeoff() again while still airborne would treat the current
 altitude as ground level, and a later land() would disarm mid-air.
 """
 
+import queue
 import threading
 
 from ..control.navigation import (
@@ -50,6 +51,43 @@ from ..core.interfaces import VehicleAdapter
 # (20s/60s); every moveToPositionAsync call below now gets one too.
 MOVE_TIMEOUT_S = 30.0  # matches the skill-level timeout in control/navigation.py
 
+# Even with the above fix, a live run still hung the same way - 3 drones landed, the 4th
+# never returned. That proves the freeze isn't inside a move/land command at all: it's in
+# getMultirotorState(), a PLAIN synchronous call AirSim's own API gives no timeout_sec
+# parameter for at all. If that call itself never returns - the connection silently
+# stalling, not the flight controller - the 30s skill-level timeout in control/skills.py
+# never gets a chance to fire, because the polling loop is stuck INSIDE the call it's
+# supposed to be timing, not at the point where it checks the clock.
+RPC_READ_TIMEOUT_S = 10.0
+
+
+def _with_timeout(fn, timeout_s: float):
+    """Runs fn() in a background thread and gives up after timeout_s. Python
+    cannot cancel an arbitrary blocking call, so a genuinely stuck call leaks
+    its thread (daemon=True, so it won't block process exit) - but the
+    caller gets control back instead of hanging forever, which is what
+    actually matters here. Known residual risk: if that orphaned call ever
+    does complete later, it touches self.client without the lock a NEW call
+    would be holding by then - accepted as better than the alternative
+    (hanging forever, every time, with no way out) for what should be a
+    rare failure path, not normal operation."""
+    result_q = queue.Queue(maxsize=1)
+
+    def run():
+        try:
+            result_q.put(("ok", fn()))
+        except Exception as e:
+            result_q.put(("error", e))
+
+    threading.Thread(target=run, daemon=True).start()
+    try:
+        status, value = result_q.get(timeout=timeout_s)
+    except queue.Empty:
+        raise TimeoutError(f"AirSim RPC call did not return within {timeout_s}s")
+    if status == "error":
+        raise value
+    return value
+
 # world-frame (x, y) unit direction per strafe action - heading is held fixed,
 # the drone strafes rather than turning to face its travel direction.
 _DIRECTIONS = {
@@ -85,9 +123,11 @@ class AirSimVehicleAdapter(VehicleAdapter):
         """The one place getMultirotorState() is called for a raw position -
         locked, and shared by every caller below, so get_position() no longer
         makes two separate RPC round-trips (get_xy() + get_height()) for what
-        is one state read."""
+        is one state read. Watchdog-timed - see RPC_READ_TIMEOUT_S above."""
         with self._lock:
-            return self.client.getMultirotorState(self.vehicle_name).kinematics_estimated.position
+            return _with_timeout(
+                lambda: self.client.getMultirotorState(self.vehicle_name).kinematics_estimated.position,
+                RPC_READ_TIMEOUT_S)
 
     def get_height(self) -> float:
         return self._from_ned(self._get_position_ned().z_val)
@@ -112,7 +152,9 @@ class AirSimVehicleAdapter(VehicleAdapter):
 
     def get_speed(self):
         with self._lock:
-            v = self.client.getMultirotorState(self.vehicle_name).kinematics_estimated.linear_velocity
+            v = _with_timeout(
+                lambda: self.client.getMultirotorState(self.vehicle_name).kinematics_estimated.linear_velocity,
+                RPC_READ_TIMEOUT_S)
         return (v.x_val ** 2 + v.y_val ** 2 + v.z_val ** 2) ** 0.5
 
     def start_move_to(self, x, y, z):

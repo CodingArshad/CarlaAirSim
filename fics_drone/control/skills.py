@@ -31,58 +31,68 @@ def go_to_waypoint(adapter: VehicleAdapter, x: float, y: float, z: float,
     move command's internal state finishes."""
     target = (x, y, z)
     start = time.monotonic()
-    adapter.start_move_to(x, y, z)
-    holding = False
+    try:
+        adapter.start_move_to(x, y, z)
+        holding = False
 
-    while True:
-        pos = adapter.get_position()
-        elapsed = time.monotonic() - start
-        close = math.dist(pos, target) <= tolerance
-        if close and not holding:
-            adapter.start_hover()
-            holding = True
-        if close and adapter.get_speed() <= max_speed:
-            return SkillResult(SkillStatus.SUCCESS, pos, elapsed)
-        if elapsed > timeout_s:
-            return SkillResult(SkillStatus.TIMEOUT, pos, elapsed,
-                                error=f"didn't reach {target} within {timeout_s}s")
-        time.sleep(SKILL_POLL_INTERVAL_S)
+        while True:
+            pos = adapter.get_position()
+            elapsed = time.monotonic() - start
+            close = math.dist(pos, target) <= tolerance
+            if close and not holding:
+                adapter.start_hover()
+                holding = True
+            if close and adapter.get_speed() <= max_speed:
+                return SkillResult(SkillStatus.SUCCESS, pos, elapsed)
+            if elapsed > timeout_s:
+                return SkillResult(SkillStatus.TIMEOUT, pos, elapsed,
+                                    error=f"didn't reach {target} within {timeout_s}s")
+            time.sleep(SKILL_POLL_INTERVAL_S)
+    except Exception as e:
+        # A real adapter call can now raise (e.g. the AirSim adapter's RPC watchdog
+        # giving up on a stalled connection) instead of hanging forever - report it
+        # as a normal FAILED skill result like everywhere else, don't let it crash
+        # this drone's whole thread silently.
+        return SkillResult(SkillStatus.FAILED, None, time.monotonic() - start, error=str(e))
 
 
 def hold_position(adapter: VehicleAdapter, duration_s: float,
                    drift_tolerance: float = SKILL_TOLERANCE_M) -> SkillResult:
-    adapter.start_hover()
-    time.sleep(SKILL_SETTLE_SECS)  # let arrival momentum die down before measuring drift
-    anchor = adapter.get_position()
     start = time.monotonic()
+    try:
+        adapter.start_hover()
+        time.sleep(SKILL_SETTLE_SECS)  # let arrival momentum die down before measuring drift
+        anchor = adapter.get_position()
 
-    while True:
-        pos = adapter.get_position()
-        elapsed = time.monotonic() - start
-        if math.dist(pos, anchor) > drift_tolerance:
-            return SkillResult(SkillStatus.FAILED, pos, elapsed,
-                                error=f"drifted more than {drift_tolerance}m while holding")
-        if elapsed >= duration_s:
-            return SkillResult(SkillStatus.SUCCESS, pos, elapsed)
-        time.sleep(SKILL_POLL_INTERVAL_S)
+        while True:
+            pos = adapter.get_position()
+            elapsed = time.monotonic() - start
+            if math.dist(pos, anchor) > drift_tolerance:
+                return SkillResult(SkillStatus.FAILED, pos, elapsed,
+                                    error=f"drifted more than {drift_tolerance}m while holding")
+            if elapsed >= duration_s:
+                return SkillResult(SkillStatus.SUCCESS, pos, elapsed)
+            time.sleep(SKILL_POLL_INTERVAL_S)
+    except Exception as e:
+        return SkillResult(SkillStatus.FAILED, None, time.monotonic() - start, error=str(e))
 
 
 def take_off(adapter: VehicleAdapter) -> SkillResult:
     start = time.monotonic()
     try:
         adapter.connect_and_takeoff()
+        return SkillResult(SkillStatus.SUCCESS, adapter.get_position(), time.monotonic() - start)
     except Exception as e:
         return SkillResult(SkillStatus.FAILED, None, time.monotonic() - start, error=str(e))
-    return SkillResult(SkillStatus.SUCCESS, adapter.get_position(), time.monotonic() - start)
 
 
 def land(adapter: VehicleAdapter) -> SkillResult:
     start = time.monotonic()
     try:
         adapter.land()
+        return SkillResult(SkillStatus.SUCCESS, adapter.get_position(), time.monotonic() - start)
     except Exception as e:
         return SkillResult(SkillStatus.FAILED, None, time.monotonic() - start, error=str(e))
-    return SkillResult(SkillStatus.SUCCESS, adapter.get_position(), time.monotonic() - start)
 
 
 def return_home(adapter: VehicleAdapter, tolerance: float = SKILL_TOLERANCE_M,

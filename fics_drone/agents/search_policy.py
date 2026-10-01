@@ -67,12 +67,19 @@ class SearchAgentPolicy:
         if belief.phase == "listening":
             # _observe_messages() already updated belief directly for anything delivered this
             # round (no event needed - a secondhand sighting doesn't require this agent to also
-            # report it). Just linger a bounded number of rounds, then head home regardless.
+            # report it). Just linger a bounded number of rounds, then check for orphaned work
+            # before heading home - a team that can change shape doesn't let a finished agent
+            # go idle while a teammate's sector sits unsearched.
             if event == ReplanEvent.SKILL_FAILED:  # a stray hold-in-place failure - not worth retrying
-                return Objective.RETURN_HOME, "returning"
+                return Objective.CHECK_FOR_ORPHANS, "checking_for_orphans"
             if belief.listen_rounds >= self.listen_rounds:
-                return Objective.RETURN_HOME, "returning"
+                return Objective.CHECK_FOR_ORPHANS, "checking_for_orphans"
             return Objective.LISTEN, "listening"
+
+        if belief.phase == "checking_for_orphans":
+            if event == ReplanEvent.NEW_TASK_ASSIGNED:
+                return Objective.SEARCH_SECTOR, "searching"
+            return Objective.RETURN_HOME, "returning"
 
         if belief.phase == "reporting":
             return Objective.RETURN_HOME, "returning"

@@ -13,8 +13,12 @@ from typing import List, Optional, Tuple
 
 from ..control.navigation import DEFAULT_HEIGHT
 from ..control.skills import go_to_waypoint, hold_position, land, take_off
+from ..coordination.bidding import DEFAULT_WEIGHTS, compute_bid
 from ..coordination.message_bus import AgentLink
 from ..coordination.protocols import MessageType
+from ..coordination.roles import HealthMonitor, HealthState
+from ..coordination.task_allocator import DEFAULT_LEASE_S
+from ..coordination.tasks import TaskBoard, TaskStatus
 from ..core.interfaces import VehicleAdapter
 from ..core.scenario import Scenario, Sector
 from ..core.skill_result import SkillStatus
@@ -77,7 +81,9 @@ class PersistentAgent:
                  spawn_offset: Tuple[float, float, float], battery_s: float,
                  policy: SearchAgentPolicy = None, guardian: Guardian = None,
                  cruise_height: float = DEFAULT_HEIGHT, logger: DecisionLogger = None,
-                 drone_name: str = "drone", link: AgentLink = None):
+                 drone_name: str = "drone", link: AgentLink = None,
+                 task_board: TaskBoard = None, health_monitor: HealthMonitor = None,
+                 kill_at_s: Optional[float] = None):
         self.adapter = adapter
         self.scenario = scenario
         self.sector = scenario.sector(sector_id)
@@ -90,11 +96,32 @@ class PersistentAgent:
         self.drone_name = drone_name
         self.link = link  # Phase 7: the only thing this agent holds for talking to teammates -
         # never the bus itself, never another agent's inbox. None = solo (Phase 5/6 behavior, unchanged).
+        self.task_board = task_board  # Phase 9: this agent's OWN view of the allocation board from
+        # Phase 8 (kept alive after allocation, not thrown away) - None disables dynamic reassignment
+        self.health_monitor = health_monitor
+        self.kill_at_s = kill_at_s  # fault-injection hook for testing failure recovery - simulates
+        # a drone going silent (no flight, no sensing, no heartbeats, nobody told), never used in
+        # a real mission
         self.belief = Belief(
             self_state=SelfState(position=(0.0, 0.0, 0.0), elapsed_s=0.0, battery_s=battery_s),
             mission=MissionBelief(sector_id=sector_id,
                                    search_queue=_build_search_queue(self.sector, spawn_offset, cruise_height)),
         )
+        if self.task_board:
+            # Seed a baseline "heard from at mission start" for every OTHER known
+            # drone (participated in allocation, so known to be alive then) - without
+            # this, a drone that dies before ever sending its first HEARTBEAT (e.g.
+            # killed during its initial climb) would never appear in team.teammates
+            # at all, and classify(None, ...) treats a total stranger as HEALTHY by
+            # design (absence of contact isn't evidence of failure for someone we
+            # don't even know exists). A known teammate's silence should actually be
+            # able to age into SUSPECTED/UNREACHABLE/FAILED, not default to healthy
+            # forever just because its very first message never arrived.
+            for spec in scenario.drones:
+                if spec.name != drone_name:
+                    self.belief.team.teammates[spec.name] = TeammateRecord(
+                        name=spec.name, last_known_position=None,
+                        provenance=Provenance(timestamp=0.0, source="mission_start"))
 
     def run(self) -> AgentReport:
         start = time.monotonic()
@@ -103,6 +130,14 @@ class PersistentAgent:
         step = 0
 
         while True:
+            if self.kill_at_s is not None and self.belief.elapsed_s >= self.kill_at_s:
+                # Simulated total failure: stop here, send nothing further. No LAND, no
+                # final HEARTBEAT, nobody told - exactly what a real crash/comms-total-loss
+                # looks like to the rest of the team, which is the only honest way to test
+                # whether they actually detect and recover from it.
+                trace.append(f"simulated_failure_at({self.kill_at_s}s)->killed")
+                break
+
             self._observe_messages()  # "observe" now includes anything teammates delivered
 
             objective, next_phase = self.policy.decide(self.belief, event)
@@ -154,13 +189,20 @@ class PersistentAgent:
             event = self._guarded_fly(leg.point, trace)
             if event != ReplanEvent.SKILL_SUCCEEDED:
                 return event
-            if self.link:
-                self.link.send(MessageType.HEARTBEAT,
-                                {"position": _to_world(self.belief.position, self.spawn_offset),
-                                 "battery_frac": self.belief.battery_frac_remaining})
+            if self.task_board:
+                # Keep my own claim fresh from OTHER agents' point of view - same cadence
+                # as the heartbeat above. claimed_by() (my own view) never needs this; it's
+                # purely so nobody else's board thinks my lease lapsed mid-sweep.
+                own_task_id = f"search_{self.belief.mission.sector_id}"
+                self.task_board.renew_lease(own_task_id, self.drone_name, self.belief.elapsed_s, DEFAULT_LEASE_S)
             return self._sense_after_arrival()
 
         if objective == Objective.REPORT:
+            # Finding a target also means this sector's search is done, same as an
+            # exhausted queue - this path bypasses LISTEN entirely (searching ->
+            # reporting -> returning, never touching "listening"), so it needs its
+            # own copy of the same completion signal, not just LISTEN's.
+            self._mark_own_task_complete()
             result = hold_position(self.adapter, AGENT_REPORT_HOLD_S)
             self.belief.position = result.final_position or self.belief.position
             unconfirmed = [s for s in self.belief.mission.targets_known.values()
@@ -176,10 +218,19 @@ class PersistentAgent:
             return ReplanEvent.REPORT_SENT
 
         if objective == Objective.LISTEN:
+            if self.belief.listen_rounds == 0:
+                # The first LISTEN round is the exact moment this agent's own search
+                # just ended with nothing found - mark completion here too (REPORT's
+                # branch covers the "found a target" path, which never touches LISTEN).
+                self._mark_own_task_complete()
             result = hold_position(self.adapter, LISTEN_HOLD_S)
             self.belief.position = result.final_position or self.belief.position
             self.belief.listen_rounds += 1
+            self._send_heartbeat()
             return ReplanEvent.SKILL_SUCCEEDED if result.status == SkillStatus.SUCCESS else ReplanEvent.SKILL_FAILED
+
+        if objective == Objective.CHECK_FOR_ORPHANS:
+            return self._check_for_orphans()
 
         if objective == Objective.RETURN_HOME:
             return self._guarded_fly((0.0, 0.0, DEFAULT_HEIGHT), trace)
@@ -213,6 +264,60 @@ class PersistentAgent:
                     name=msg.sender, last_known_position=msg.payload["position"],
                     provenance=Provenance(timestamp=self.belief.elapsed_s, source="heartbeat",
                                            base_confidence=msg.confidence))
+            elif msg.type == MessageType.TASK_COMPLETE and self.task_board:
+                self.task_board.mark_complete(msg.payload["task_id"], msg.sender)
+                # A message of any kind is proof of life too, not just a HEARTBEAT -
+                # update the sender's last-known-alive timestamp so finishing
+                # normally doesn't itself look like the silence that precedes it.
+                existing = self.belief.team.teammates.get(msg.sender)
+                self.belief.team.teammates[msg.sender] = TeammateRecord(
+                    name=msg.sender, last_known_position=existing.last_known_position if existing else None,
+                    provenance=Provenance(timestamp=self.belief.elapsed_s, source="task_complete"))
+            elif msg.type == MessageType.TASK_CLAIM and self.task_board:
+                # A survivor's reclaim-claim, broadcast from _check_for_orphans -
+                # every other agent's board needs to reflect it too, same Lamport
+                # acceptance rule as the original Phase 8 allocation round.
+                self.task_board.apply_claim(msg.payload["task_id"], msg.sender, msg.payload["bid"],
+                                             msg.payload["version"], self.belief.elapsed_s, DEFAULT_LEASE_S)
+
+    def _check_for_orphans(self) -> ReplanEvent:
+        """Phase 9's actual 'team changes shape' behavior. Reclassifies every
+        known teammate's health from belief alone, releases any task held by
+        one classified FAILED (short-circuits the lease - FICS's bug #3),
+        then looks for a task that's unheld and isn't my own. Claims it
+        directly if found - this agent is the one who noticed, so it claims
+        unilaterally rather than running a full bid round (which would need
+        another message round-trip, with no guarantee anyone else is even
+        still listening)."""
+        if not self.task_board or not self.health_monitor:
+            return ReplanEvent.SKILL_SUCCEEDED  # no Phase 9 wiring - behave exactly like Phase 7
+
+        now = self.belief.elapsed_s
+        for name, record in list(self.belief.team.teammates.items()):
+            if self.health_monitor.classify(record, now) == HealthState.FAILED:
+                for task_id in list(self.task_board.tasks):
+                    self.task_board.release_if_failed(task_id, name)
+
+        own_sector = self.belief.mission.sector_id
+        for task_id, task in self.task_board.tasks.items():
+            if task.sector_id == own_sector or task.status == TaskStatus.COMPLETE:
+                continue
+            if self.task_board.held_by(task_id, now) is not None:
+                continue  # someone genuinely still holds it
+            sector = self.scenario.sector(task.sector_id)
+            bid = compute_bid(_to_world(self.belief.position, self.spawn_offset),
+                               self.belief.battery_frac_remaining, workload=0, sector=sector,
+                               weights=DEFAULT_WEIGHTS)
+            version = self.task_board.next_version(task_id)
+            accepted = self.task_board.apply_claim(task_id, self.drone_name, bid, version, now, DEFAULT_LEASE_S)
+            if accepted:
+                if self.link:
+                    self.link.send(MessageType.TASK_CLAIM, {"task_id": task_id, "bid": bid, "version": version})
+                self.belief.mission.sector_id = task.sector_id
+                self.belief.mission.search_queue = _build_search_queue(sector, self.spawn_offset, self.cruise_height)
+                self.belief.listen_rounds = 0  # the new sector gets its own full listen window later
+                return ReplanEvent.NEW_TASK_ASSIGNED
+        return ReplanEvent.SKILL_SUCCEEDED
 
     def _sense_after_arrival(self) -> ReplanEvent:
         """The only place a target can enter belief: a real sensor reading at
@@ -235,6 +340,34 @@ class PersistentAgent:
         result = go_to_waypoint(self.adapter, *local_target)
         self.belief.position = result.final_position or self.belief.position
         if result.status == SkillStatus.SUCCESS:
+            # Every successful flight command sends a heartbeat - GO_TO_SECTOR,
+            # SEARCH_SECTOR legs, and RETURN_HOME all go through here, covering nearly
+            # the whole mission lifecycle. Found live: heartbeats sent only during
+            # active search meant a drone that finished normally (found its target,
+            # reporting/returning/landing) went quiet exactly like a dead one would -
+            # survivors couldn't tell "done" from "failed" and stole an already-
+            # finished sector instead of the actually-orphaned one.
+            self._send_heartbeat()
             return ReplanEvent.SKILL_SUCCEEDED
         self.belief.nav_retries += 1
         return ReplanEvent.SKILL_FAILED
+
+    def _mark_own_task_complete(self):
+        """Explicit completion signal, not just going quiet - silence alone
+        can't distinguish 'finished normally' from 'died', since both look
+        identical to a teammate as 'stopped sending heartbeats'. Called
+        exactly once per sector this agent works, from whichever path ends
+        that sector's search first (REPORT if a target was found, LISTEN's
+        first round if nothing was)."""
+        if not self.task_board:
+            return
+        own_task_id = f"search_{self.belief.mission.sector_id}"
+        self.task_board.mark_complete(own_task_id, self.drone_name)
+        if self.link:
+            self.link.send(MessageType.TASK_COMPLETE, {"task_id": own_task_id})
+
+    def _send_heartbeat(self):
+        if self.link:
+            self.link.send(MessageType.HEARTBEAT,
+                            {"position": _to_world(self.belief.position, self.spawn_offset),
+                             "battery_frac": self.belief.battery_frac_remaining})

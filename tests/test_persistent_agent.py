@@ -68,11 +68,26 @@ class TestSearchPolicy(unittest.TestCase):
         self.assertEqual(objective, Objective.LISTEN)
         self.assertEqual(phase, "listening")
 
-    def test_listening_returns_home_after_enough_rounds(self):
+    def test_listening_checks_for_orphans_after_enough_rounds(self):
+        """Phase 9: listening exhausted now checks for a teammate's orphaned
+        task before heading home, instead of going straight to RETURN_HOME."""
         b = self._belief("listening")
         b.self_state.listen_rounds = self.policy.listen_rounds
         objective, phase = self.policy.decide(b, ReplanEvent.SKILL_SUCCEEDED)
+        self.assertEqual(objective, Objective.CHECK_FOR_ORPHANS)
+        self.assertEqual(phase, "checking_for_orphans")
+
+    def test_check_for_orphans_with_nothing_found_returns_home(self):
+        b = self._belief("checking_for_orphans")
+        objective, phase = self.policy.decide(b, ReplanEvent.SKILL_SUCCEEDED)
         self.assertEqual(objective, Objective.RETURN_HOME)
+        self.assertEqual(phase, "returning")
+
+    def test_check_for_orphans_finding_one_resumes_searching(self):
+        b = self._belief("checking_for_orphans")
+        objective, phase = self.policy.decide(b, ReplanEvent.NEW_TASK_ASSIGNED)
+        self.assertEqual(objective, Objective.SEARCH_SECTOR)
+        self.assertEqual(phase, "searching")
 
     def test_nav_retries_exceeded_aborts_to_return_home(self):
         b = self._belief("searching", nav_retries=SearchAgentPolicy().max_nav_retries)

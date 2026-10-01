@@ -61,10 +61,15 @@ class TaskBoard:
     def bids_for(self, task_id: str) -> Dict[str, float]:
         return dict(self._bids.get(task_id, {}))
 
-    def apply_claim(self, task_id: str, claimant: str, bid: float, version: int) -> bool:
+    def apply_claim(self, task_id: str, claimant: str, bid: float, version: int,
+                     now: Optional[float] = None, lease_s: Optional[float] = None) -> bool:
         """Lamport-clock acceptance rule: a higher version always wins; on a
         tie, the lower bid wins; on a further tie, the lower vehicle name
-        wins. Returns True if this claim was accepted (the board changed)."""
+        wins. Returns True if this claim was accepted (the board changed).
+        now/lease_s are optional so existing Phase 8 callers (pre-flight
+        allocation, where lease tracking doesn't matter yet) don't need to
+        change - a claim with no lease info just never expires until
+        something sets one."""
         task = self.tasks[task_id]
         if task.status == TaskStatus.OPEN:
             accept = True
@@ -82,10 +87,81 @@ class TaskBoard:
             task.assignee = claimant
             task.winning_bid = bid
             task.version = version
+            if now is not None and lease_s is not None:
+                task.lease_expires_at = now + lease_s
         return accept
 
     def next_version(self, task_id: str) -> int:
         return self.tasks[task_id].version + 1
+
+    def mark_complete(self, task_id: str, agent_name: str) -> bool:
+        """An agent that finishes its own sector marks it explicitly, rather
+        than just going quiet - silence alone can't tell 'finished normally'
+        from 'died', since both look identical to a teammate as 'stopped
+        sending heartbeats'. A COMPLETE task is never offered up for reclaim,
+        regardless of lease or health state."""
+        task = self.tasks[task_id]
+        if task.assignee == agent_name:
+            task.status = TaskStatus.COMPLETE
+            return True
+        return False
+
+    # --- Phase 9: lease, self-view vs others'-view, health short-circuit ---
+    # FICS's own build hit three bugs here, all really one issue: the relationship
+    # between lease duration and skill duration. Designed around all three from the
+    # start rather than rediscovering them live:
+    #   1. A drone must trust its OWN claim regardless of lease expiry - claimed_by()
+    #      is lease-independent, for exactly this reason (an agent mid-sweep still
+    #      considers itself the holder even if the lease clock is running low).
+    #   2. Lease must exceed the longest skill (DEFAULT_LEASE_S=300.0 in
+    #      task_allocator.py already satisfies this - the live build's longest
+    #      measured sweep was ~218s).
+    #   3. Health detection must be able to short-circuit the lease - waiting out a
+    #      300s lease for a drone the team already knows is gone would mean most of
+    #      the mission goes unsearched for no reason. release_if_failed() does this.
+
+    def renew_lease(self, task_id: str, holder_name: str, now: float, lease_s: float):
+        """The holder calls this periodically (same cadence as its own
+        heartbeat) to keep its claim fresh from OTHER agents' point of view."""
+        task = self.tasks[task_id]
+        if task.assignee == holder_name:
+            task.lease_expires_at = now + lease_s
+
+    def claimed_by(self, agent_name: str) -> list:
+        """Self-view: every task this agent believes it holds, regardless of
+        lease expiry. An agent must never lose track of its own work just
+        because a lease timer happened to lapse - FICS's bug #1."""
+        return [tid for tid, t in self.tasks.items() if t.assignee == agent_name]
+
+    def held_by(self, task_id: str, now: float) -> Optional[str]:
+        """Others'-view: who - if anyone - currently holds this task, with
+        lease expiry actually counting. Returns None (available to reclaim)
+        if the lease has lapsed, even though the holder's OWN board (via
+        claimed_by) still considers it theirs - that asymmetry is the whole
+        point, not a bug."""
+        task = self.tasks[task_id]
+        if task.status != TaskStatus.CLAIMED:
+            return None
+        if task.lease_expires_at is not None and now > task.lease_expires_at:
+            return None
+        return task.assignee
+
+    def release_if_failed(self, task_id: str, failed_agent: str) -> bool:
+        """Short-circuits the lease: a task held by a teammate HealthMonitor
+        has classified FAILED becomes available immediately, not after
+        waiting out the full lease. Returns True if this task was actually
+        released."""
+        task = self.tasks[task_id]
+        if task.assignee == failed_agent and task.status == TaskStatus.CLAIMED:
+            task.status = TaskStatus.OPEN
+            task.assignee = None
+            task.winning_bid = None
+            task.lease_expires_at = None
+            # version is NOT reset - the Lamport clock must keep counting up, or a
+            # later re-claim at a lower version could lose to a stale message still
+            # in flight that references the old, higher version.
+            return True
+        return False
 
     def greedy_global_assignment(self, own_name: str, own_bids: Dict[str, float]) -> Dict[str, str]:
         """One-to-one, not one task independently winner-picked per task -

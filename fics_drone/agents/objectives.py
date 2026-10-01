@@ -13,6 +13,9 @@ class Objective(str, Enum):
     LISTEN = "listen"  # Phase 7: sector fully swept, nothing of its own left to do - lingers
     # briefly to catch a late-arriving TARGET_FOUND from a teammate before heading home, instead
     # of heading home the instant its own work ends and missing a report that was en route
+    CHECK_FOR_ORPHANS = "check_for_orphans"  # Phase 9: after listening, before heading home -
+    # is there a teammate's task that's unheld (lease lapsed, or its holder is believed failed)?
+    # Picking this up instead of going home is the actual "team changes shape" behavior.
     RETURN_HOME = "return_home"
     LAND = "land"
     DONE = "done"
@@ -28,3 +31,4 @@ class ReplanEvent(str, Enum):
     BATTERY_LOW = "battery_low"
     BATTERY_CRITICAL = "battery_critical"
     GUARDIAN_BLOCKED = "guardian_blocked"
+    NEW_TASK_ASSIGNED = "new_task_assigned"  # Phase 9: picked up an orphaned teammate's task

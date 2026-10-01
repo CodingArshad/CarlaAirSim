@@ -85,6 +85,25 @@ class TestSearchPolicy(unittest.TestCase):
         self.assertEqual(objective, Objective.SEARCH_SECTOR)
         self.assertEqual(phase, "searching")
 
+    def test_returning_never_loops_forever_on_repeated_failure(self):
+        """The real bug this caught live: retrying RETURN_HOME when the
+        objective that just failed WAS RETURN_HOME degenerated into the
+        policy returning the exact same (RETURN_HOME, "returning") forever,
+        with no actual exit - 3 of 4 drones completed a real mission, the
+        4th spun on this transition indefinitely with no error. Once
+        retries are exhausted, the agent must land in place, never keep
+        retrying the one thing that's already failing."""
+        b = self._belief("returning", nav_retries=SearchAgentPolicy().max_nav_retries)
+        objective, phase = self.policy.decide(b, ReplanEvent.SKILL_FAILED)
+        self.assertEqual(objective, Objective.LAND)
+        self.assertEqual(phase, "landing")
+
+    def test_returning_retries_before_giving_up(self):
+        b = self._belief("returning", nav_retries=0)
+        objective, phase = self.policy.decide(b, ReplanEvent.SKILL_FAILED)
+        self.assertEqual(objective, Objective.RETURN_HOME)
+        self.assertEqual(phase, "returning")
+
     def test_guardian_blocked_leg_does_not_count_as_a_nav_retry(self):
         b = self._belief("searching", nav_retries=0)
         objective, phase = self.policy.decide(b, ReplanEvent.GUARDIAN_BLOCKED)

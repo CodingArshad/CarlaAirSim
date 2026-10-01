@@ -79,7 +79,21 @@ class SearchAgentPolicy:
 
         if belief.phase == "returning":
             if event in (ReplanEvent.SKILL_FAILED, ReplanEvent.GUARDIAN_BLOCKED):
-                return self._retry_or_abort(belief, Objective.RETURN_HOME, "returning")
+                # _retry_or_abort's "abort" destination is normally a genuinely
+                # different, safer objective than the one that just failed - but
+                # here the objective being retried IS RETURN_HOME already, so
+                # "retry" and "abort" degenerate to the exact same (RETURN_HOME,
+                # "returning") and the policy can loop on this forever with no
+                # actual exit. Found live: 3 of 4 drones completed normally, the
+                # 4th spun on this transition indefinitely with no error, because
+                # every one of several unrelated timeout fixes just turned a hang
+                # into a failure that fed straight back into this same loop.
+                # Real abort destination: land in place. A drone that can't get
+                # home after repeated tries should stop trying the one thing
+                # that's already failing, not retry it forever.
+                if belief.nav_retries >= self.max_nav_retries:
+                    return Objective.LAND, "landing"
+                return Objective.RETURN_HOME, "returning"
             return Objective.LAND, "landing"
 
         if belief.phase == "landing":

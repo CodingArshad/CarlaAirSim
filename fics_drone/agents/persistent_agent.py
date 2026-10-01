@@ -27,6 +27,8 @@ from .guardian import Guardian
 from .objectives import Objective, ReplanEvent
 from .search_policy import SearchAgentPolicy
 
+MAX_STEPS = 500  # hard backstop against a future undiscovered infinite-loop bug in the policy -
+# a real mission finishes in well under 50 decision steps even with retries, so this is generous
 AGENT_REPORT_HOLD_S = 3.0  # how long THIS agent holds position to confirm a sighting - an agent-
 # owned protocol constant, deliberately not read from the scenario's Target.dwell_s (that would be
 # the same ground-truth leak Phase 6 exists to close, just moved to a different field)
@@ -111,6 +113,16 @@ class PersistentAgent:
             step += 1
 
             if objective == Objective.DONE:
+                break
+
+            if step > MAX_STEPS:
+                # Belt-and-braces: a genuine infinite-loop bug in the policy (found
+                # live - returning's retry/abort degenerated to the same objective
+                # forever) spun this exact loop with no exit for over an hour before
+                # being caught by hand. That bug is fixed, but nothing should ever
+                # again be able to hang a whole multi-drone mission on one agent
+                # with no error at all - this is the hard backstop for a future one.
+                trace.append(f"step_limit_exceeded({MAX_STEPS})->aborted")
                 break
 
             event = self._execute(objective, trace)

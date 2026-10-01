@@ -18,6 +18,21 @@ from ..coordination.message_bus import AgentLink, MessageBus
 from ..coordination.task_allocator import TaskAllocator
 from ..core.scenario import Scenario
 
+# Belt-and-braces alongside PersistentAgent's own MAX_STEPS backstop: a genuine
+# infinite-loop bug once made one drone's thread spin forever with no error, and the
+# plain t.join() here waited on it silently with zero visibility. Generous (well above
+# any real mission's ~300s battery budget), but bounded, and now at least reports which
+# drone never finished instead of leaving the whole process looking hung with no clue why.
+FLEET_JOIN_TIMEOUT_S = 600.0
+
+
+def _join_all(threads, names):
+    for t, name in zip(threads, names):
+        t.join(timeout=FLEET_JOIN_TIMEOUT_S)
+        if t.is_alive():
+            print(f"WARNING: {name}'s thread did not finish within {FLEET_JOIN_TIMEOUT_S}s "
+                  f"- abandoning it, continuing with whatever else completed")
+
 
 def run_team_threaded(scenario: Scenario, adapters: Dict[str, object], bus: MessageBus = None,
                        loggers: Dict[str, DecisionLogger] = None) -> Dict[str, AgentReport]:
@@ -40,8 +55,7 @@ def run_team_threaded(scenario: Scenario, adapters: Dict[str, object], bus: Mess
     threads = [threading.Thread(target=fly_one, args=(name,)) for name in agents]
     for t in threads:
         t.start()
-    for t in threads:
-        t.join()
+    _join_all(threads, list(agents.keys()))
 
     return reports, agents, bus
 
@@ -94,7 +108,6 @@ def run_team_with_allocation(scenario: Scenario, adapters: Dict[str, object], bu
     threads = [threading.Thread(target=fly_one, args=(name,)) for name in agents]
     for t in threads:
         t.start()
-    for t in threads:
-        t.join()
+    _join_all(threads, list(agents.keys()))
 
     return reports, agents, bus, assignment

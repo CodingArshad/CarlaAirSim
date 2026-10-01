@@ -39,6 +39,17 @@ from ..core.interfaces import VehicleAdapter
 # another drone's thread. A lock PER ADAPTER (see __init__) protects exactly
 # that real overlap, with zero unrelated contention between drones.
 
+# moveToPositionAsync()'s own timeout_sec parameter defaults to 3e38 - effectively
+# unbounded - unless passed explicitly, which nothing here did. A live multi-drone
+# run hung for over an hour: 3 of 4 drones landed fine, the 4th never returned,
+# because all 4 land at the same tight spawn cluster and the last one back can find
+# the landing zone already occupied by a parked drone. If noclip wasn't active, that
+# collision means the move server-side NEVER reports completion, so an unbounded
+# .join() blocks forever - no code-level logic can recover from that, only a real
+# server-side timeout can. takeoffAsync/landAsync already default to sane timeouts
+# (20s/60s); every moveToPositionAsync call below now gets one too.
+MOVE_TIMEOUT_S = 30.0  # matches the skill-level timeout in control/navigation.py
+
 # world-frame (x, y) unit direction per strafe action - heading is held fixed,
 # the drone strafes rather than turning to face its travel direction.
 _DIRECTIONS = {
@@ -90,7 +101,7 @@ class AirSimVehicleAdapter(VehicleAdapter):
     def connect_and_takeoff(self):
         self._ground_ned = self._get_position_ned().z_val  # recorded here - see the module docstring
         with self._lock:
-            self.client.takeoffAsync(vehicle_name=self.vehicle_name).join()
+            self.client.takeoffAsync(vehicle_name=self.vehicle_name, timeout_sec=20).join()
         self.set_height(DEFAULT_HEIGHT)  # locks internally
 
     # --- non-blocking primitives, for skills.py's polling loops ---
@@ -124,6 +135,7 @@ class AirSimVehicleAdapter(VehicleAdapter):
         with self._lock:
             self.client.moveToPositionAsync(
                 x, y, self._to_ned(z), MOVE_SPEED, vehicle_name=self.vehicle_name,
+                timeout_sec=MOVE_TIMEOUT_S,
             ).join()
 
     def set_height(self, z):
@@ -131,6 +143,7 @@ class AirSimVehicleAdapter(VehicleAdapter):
         with self._lock:
             self.client.moveToPositionAsync(
                 x, y, self._to_ned(z), MOVE_SPEED, vehicle_name=self.vehicle_name,
+                timeout_sec=MOVE_TIMEOUT_S,
             ).join()
 
     def _strafe(self, action, distance):
@@ -140,7 +153,7 @@ class AirSimVehicleAdapter(VehicleAdapter):
         with self._lock:
             self.client.moveToPositionAsync(
                 x + dx * distance, y + dy * distance, target_z, MOVE_SPEED,
-                vehicle_name=self.vehicle_name,
+                vehicle_name=self.vehicle_name, timeout_sec=MOVE_TIMEOUT_S,
             ).join()
 
     def hover(self, duration):
@@ -158,6 +171,7 @@ class AirSimVehicleAdapter(VehicleAdapter):
         with self._lock:
             self.client.moveToPositionAsync(
                 x, y, fast_target_ned, LAND_FAST_SPEED, vehicle_name=self.vehicle_name,
+                timeout_sec=MOVE_TIMEOUT_S,
             ).join()
             self.client.hoverAsync(vehicle_name=self.vehicle_name).join()
         import time
@@ -166,8 +180,9 @@ class AirSimVehicleAdapter(VehicleAdapter):
         with self._lock:
             self.client.moveToPositionAsync(
                 x, y, self._ground_ned, LAND_SLOW_SPEED, vehicle_name=self.vehicle_name,
+                timeout_sec=MOVE_TIMEOUT_S,
             ).join()
-            self.client.landAsync(vehicle_name=self.vehicle_name).join()
+            self.client.landAsync(vehicle_name=self.vehicle_name, timeout_sec=60).join()
             self.client.armDisarm(False, self.vehicle_name)
 
     # --- run a validated plan ---

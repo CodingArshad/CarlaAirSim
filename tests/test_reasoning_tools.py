@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from fics_drone.agents.belief import Belief
 from fics_drone.agents.belief_schema import MissionBelief, Provenance, SelfState, TeammateRecord
+from fics_drone.agents.decision_schema import decision_json
 from fics_drone.agents.llm_backends import ScriptedBackend
 from fics_drone.agents.llm_policy import LLMAgentPolicy, make_policy_factory
 from fics_drone.agents.objectives import Objective, ReplanEvent
@@ -47,7 +48,7 @@ def _tools(offset=(0.0, 0.0, 0.0), speed=5.0):
 
 
 def _wp(x, y):
-    return '{"objective": "go_to_waypoint", "reason_code": "search_elsewhere", "x": %s, "y": %s}' % (x, y)
+    return decision_json("go_to_waypoint", "search_elsewhere", x=x, y=y)
 
 
 class TestGeometry(unittest.TestCase):
@@ -203,7 +204,7 @@ class TestPolicyAssistModes(unittest.TestCase):
         self.assertFalse(policy.records[0].repaired)
 
     def test_an_unrepairable_point_goes_through_raw_so_the_guardian_still_blocks_it(self):
-        policy, _ = self._policy(_wp("NaN", 0), "repair")
+        policy, _ = self._policy(_wp(float("nan"), 0), "repair")
         policy.decide(_belief(), ReplanEvent.SKILL_SUCCEEDED)
         flown = policy.take_waypoint()
         self.assertTrue(math.isnan(flown[0]))
@@ -217,7 +218,7 @@ class TestPolicyAssistModes(unittest.TestCase):
     def test_context_mode_puts_the_checked_points_in_the_prompt_and_off_does_not(self):
         s = _scenario()
         for assist, shown in (("context", True), ("off", False), ("repair", False)):
-            backend = ScriptedBackend(['{"objective": "return_home", "reason_code": "my_work_is_done"}'], respond=None)
+            backend = ScriptedBackend([decision_json("return_home")], respond=None)
             tools = ReasoningTools(s) if assist != "off" else None
             LLMAgentPolicy(backend, sectors=s.sectors, assist=assist, tools=tools).decide(
                 _belief(), ReplanEvent.SKILL_SUCCEEDED)
@@ -256,7 +257,7 @@ class TestRepairEndToEnd(unittest.TestCase):
         s = _scenario()
         offset = (20.0, 0.0, 0.0)
         adapter = RecordingMock("Drone3", speed_mps=25.0)
-        policy = LLMAgentPolicy(ScriptedBackend([_wp(0, 52)] + ['{"objective": "return_home", "reason_code": "my_work_is_done"}'] * 3,
+        policy = LLMAgentPolicy(ScriptedBackend([_wp(0, 52)] + [decision_json("return_home")] * 3,
                                                 respond=None),
                                 sectors=s.sectors, spawn_offset=offset, assist="repair",
                                 tools=ReasoningTools(s, spawn_offset=offset))
@@ -272,7 +273,7 @@ class TestRepairEndToEnd(unittest.TestCase):
     def test_without_repair_the_same_proposal_is_blocked(self):
         s = _scenario()
         offset = (20.0, 0.0, 0.0)
-        policy = LLMAgentPolicy(ScriptedBackend([_wp(0, 52)] + ['{"objective": "return_home", "reason_code": "my_work_is_done"}'] * 3,
+        policy = LLMAgentPolicy(ScriptedBackend([_wp(0, 52)] + [decision_json("return_home")] * 3,
                                                 respond=None), sectors=s.sectors, spawn_offset=offset)
         agent = PersistentAgent(RecordingMock("Drone3", speed_mps=25.0), s, "C", offset, 300.0,
                                 policy=policy, drone_name="Drone3")
@@ -288,7 +289,7 @@ class TestProbe(unittest.TestCase):
 
     def test_probe_is_deterministic_for_a_deterministic_model(self):
         backend = lambda: ScriptedBackend(respond=lambda p: _wp(0, 50) if "- go_to_waypoint:" in p else
-                                          '{"objective": "return_home", "reason_code": "my_work_is_done"}')
+                                          decision_json("return_home"))
         r1 = run_probe(backend(), _scenario(), n=8, seed=3)
         r2 = run_probe(backend(), _scenario(), n=8, seed=3)
         self.assertEqual(r1["summary"], r2["summary"])
@@ -297,7 +298,7 @@ class TestProbe(unittest.TestCase):
         """A model that always names a point inside the no-fly zone: illegal alone, illegal with
         feedback (it repeats it), and only 'repair' ever produces a legal flown point."""
         backend = ScriptedBackend(respond=lambda p: _wp(0, 50) if "- go_to_waypoint:" in p else
-                                  '{"objective": "return_home", "reason_code": "my_work_is_done"}')
+                                  decision_json("return_home"))
         s = run_probe(backend, _scenario(), n=12, seed=11)["summary"]
         self.assertEqual(s["none"]["waypoint_rate"], 1.0)
         self.assertEqual(s["none"]["raw_legal_rate"], 0.0)

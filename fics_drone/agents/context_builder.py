@@ -8,7 +8,8 @@ exists to make. Turn 200 should be the same kind of decision as turn 3.
 from typing import Optional, Sequence, Tuple
 
 from .belief import Belief
-from .decision_schema import REASON_CODES
+from .decision_schema import (COMMUNICATION_STATUS, CURRENT_RISK, MAX_OUTGOING_MESSAGES, MISSION_PROGRESS,
+                              REASON_CODES)
 from .objectives import Objective, ReplanEvent
 
 MAX_TEAMMATES_SHOWN = 8
@@ -64,15 +65,28 @@ def build_prompt(belief: Belief, event: ReplanEvent, legal: Sequence[Objective],
           if event == ReplanEvent.GUARDIAN_BLOCKED and belief.self_state.last_block_reason else []),
         "TEAMMATES",
         *team_lines,
+        *([f"HELP REQUESTS RECEIVED (informational only; you are not obliged to act on them)",
+           *[f"- {sender} asked for help ({code}) {max(0.0, belief.elapsed_s - t):.0f}s ago"
+             for sender, code, t in belief.communication.help_requests[-3:]]]
+          if belief.communication.help_requests else []),
         *map_lines,
         "OPTIONS",
         *[f"- {o.value}: {OPTION_MEANING[o]}" for o in legal],
         "",
-        'Reply with ONLY a JSON object: {"objective": "<option>", "reason_code": "<code>"}',
-        *(['If (and only if) you choose go_to_waypoint, the object must also contain the coordinates: '
-           '{"objective": "go_to_waypoint", "reason_code": "<code>", "x": <number>, "y": <number>}']
+        "Reply with ONLY a JSON object of exactly this shape:",
+        '{"situation_assessment": {"mission_progress": "<' + '|'.join(MISSION_PROGRESS) + '>", '
+        '"communication_status": "<' + '|'.join(COMMUNICATION_STATUS) + '>", '
+        '"current_risk": "<' + '|'.join(CURRENT_RISK) + '>"}, '
+        '"selected_tool": "<option>", "parameters": {"reason_code": "<code>"}, '
+        '"outgoing_messages": [], "confidence": <number from 0 to 1>}',
+        *(['If (and only if) you choose go_to_waypoint, parameters must also contain the coordinates: '
+           '{"reason_code": "<code>", "x": <number>, "y": <number>}']
           if Objective.GO_TO_WAYPOINT in legal else []),
         f"reason_code must be one of: {', '.join(REASON_CODES)}",
+        *(['outgoing_messages is [] unless you want to ask teammates for help; then each message is '
+           '{"message_type": "help_request", "recipients": ["<teammate name from TEAMMATES>"], '
+           '"payload": {"reason_code": "<code>"}} (at most ' + str(MAX_OUTGOING_MESSAGES) + ', help_request is the only type allowed)']
+          if teammates else ['outgoing_messages must be [] (you have no teammates to message)']),
     ]
     if correction:
         lines += ["", f"YOUR PREVIOUS ANSWER WAS REJECTED: {correction}. Answer again, following the format exactly."]

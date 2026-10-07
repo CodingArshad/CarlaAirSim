@@ -13,6 +13,8 @@ import threading
 from abc import ABC, abstractmethod
 from typing import Callable, Optional, Sequence, Union
 
+from .decision_schema import decision_json
+
 
 class BackendTimeout(Exception):
     """The model did not answer within the time budget."""
@@ -34,8 +36,8 @@ def default_script(prompt: str) -> str:
     teammate. Reads the same prompt a real model would - no side channel."""
     waiting_offered = "- listen:" in prompt
     if waiting_offered and "second_hand_targets: 0" in prompt:
-        return '{"objective": "listen", "reason_code": "waiting_for_report"}'
-    return '{"objective": "check_for_orphans", "reason_code": "teammate_may_need_help"}'
+        return decision_json("listen", "waiting_for_report")
+    return decision_json("check_for_orphans", "teammate_may_need_help")
 
 
 class ScriptedBackend(ModelBackend):

@@ -100,6 +100,8 @@ class TeamBelief:
 @dataclass
 class CommunicationBelief:
     last_report_sent: Optional[str] = None  # target_id last reported, Phase 7 gives this a real destination
+    help_requests: List[Tuple[str, str, float]] = field(default_factory=list)  # Phase 12.3: (sender,
+    # reason_code, elapsed_s) of the most recent HELP_REQUESTs received, capped - purely informational
 
 
 @dataclass

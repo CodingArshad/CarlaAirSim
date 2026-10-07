@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from fics_drone.agents.belief import Belief
 from fics_drone.agents.belief_schema import MissionBelief, SelfState
+from fics_drone.agents.decision_schema import decision_json
 from fics_drone.agents.llm_backends import BackendError, BackendTimeout, ScriptedBackend
 from fics_drone.agents.llm_policy import LLMAgentPolicy, make_policy_factory
 from fics_drone.agents.persistent_agent import PersistentAgent
@@ -31,12 +32,23 @@ from fics_drone.simulator.kinematic_mock_adapter import KinematicMockVehicleAdap
 DEFAULT_SCENARIO = os.path.join(os.path.dirname(__file__), "..", "configs", "missions",
                                  "search_relay_001.json")
 
+def _msg(message_type, recipients, payload=None):
+    return {"message_type": message_type, "recipients": recipients,
+            "payload": payload or {"reason_code": "teammate_may_need_help"}}
+
+
 FAILURE_CASES = [
     ("prose instead of JSON", ["Sure! I think we should go home.", "Going home."]),
-    ("tool that does not exist", ['{"objective": "deploy_countermeasures", "reason_code": "my_work_is_done"}'] * 2),
-    ("missing required field", ['{"objective": "return_home"}'] * 2),
-    ("invented extra field (x=400)", ['{"objective": "return_home", "reason_code": "my_work_is_done", "x": 400}'] * 2),
-    ("real objective not on the menu", ['{"objective": "take_off", "reason_code": "my_work_is_done"}'] * 2),
+    ("tool that does not exist", [decision_json("deploy_countermeasures")] * 2),
+    ("old flat format (no assessment)", ['{"objective": "return_home", "reason_code": "my_work_is_done"}'] * 2),
+    ("assessment outside the enums", [decision_json("return_home", assessment={
+        "mission_progress": "going_well", "communication_status": "good", "current_risk": "low"})] * 2),
+    ("invented parameter (x on return_home)", [decision_json("return_home", x=400, y=400)] * 2),
+    ("real tool not on the menu", [decision_json("take_off")] * 2),
+    ("confidence out of range", [decision_json("return_home", confidence=7)] * 2),
+    ("message to a drone that does not exist", [decision_json("return_home", messages=[_msg("help_request", ["Drone99"])])] * 2),
+    ("forged TARGET_FOUND message", [decision_json("return_home", messages=[
+        _msg("target_found", ["Drone1"], {"target_id": "T9", "world_position": [0, 0, 0]})])] * 2),
     ("model times out", [BackendTimeout("hung")]),
     ("model server down", [BackendError("connection refused")]),
 ]
@@ -59,10 +71,10 @@ def run_failure_catalogue():
 
 
 UNSAFE_WAYPOINTS = [
-    ("inside the no-fly zone", '0', '50'),
-    ("outside the geofence", '5000', '0'),
-    ("beyond max distance", '1000', '0'),
-    ("not a number (NaN)", 'NaN', '0'),
+    ("inside the no-fly zone", 0, 50),
+    ("outside the geofence", 5000, 0),
+    ("beyond max distance", 1000, 0),
+    ("not a number (NaN)", float("nan"), 0),
 ]
 
 
@@ -72,13 +84,12 @@ def run_unsafe_catalogue():
     scenario = load_scenario(DEFAULT_SCENARIO)
     print(f"{'model output':26} {'validation':11} {'guardian':18} {'failed checks':36} reached vehicle")
     for label, x, y in UNSAFE_WAYPOINTS:
-        raw = ('{"objective": "go_to_waypoint", "reason_code": "search_elsewhere", "x": %s, "y": %s}' % (x, y))
+        raw = decision_json("go_to_waypoint", "search_elsewhere", x=x, y=y)
         adapter = KinematicMockVehicleAdapter("Drone3", speed_mps=25.0)
         sent = []
         original = adapter.start_move_to
         adapter.start_move_to = lambda a, b, c, _o=original, _s=sent: (_s.append((a, b, c)), _o(a, b, c))[1]
-        policy = LLMAgentPolicy(ScriptedBackend([raw] + ['{"objective": "return_home", "reason_code": "my_work_is_done"}'] * 3,
-                                                respond=None),
+        policy = LLMAgentPolicy(ScriptedBackend([raw] + [decision_json("return_home")] * 3, respond=None),
                                 sectors=scenario.sectors, spawn_offset=(20.0, 0.0, 0.0))
         agent = PersistentAgent(adapter, scenario, "C", (20.0, 0.0, 0.0), 300.0, policy=policy, drone_name="Drone3")
         agent.run()

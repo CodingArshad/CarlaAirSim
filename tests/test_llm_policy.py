@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from fics_drone.agents.belief import Belief
 from fics_drone.agents.belief_schema import MissionBelief, Provenance, SelfState, TeammateRecord
 from fics_drone.agents.decision_schema import (DecisionRejected, REASON_CODES, RejectionKind,
-                                               parse_decision)
+                                               decision_json, parse_decision)
 from fics_drone.agents.llm_backends import BackendError, BackendTimeout, ScriptedBackend
 from fics_drone.agents.llm_policy import LLMAgentPolicy, make_policy_factory
 from fics_drone.agents.persistent_agent import PersistentAgent
@@ -34,9 +34,9 @@ from fics_drone.simulator.kinematic_mock_adapter import KinematicMockVehicleAdap
 SCENARIO_PATH = os.path.join(os.path.dirname(__file__), "..", "configs", "missions",
                               "search_relay_001.json")
 
-LISTEN_JSON = '{"objective": "listen", "reason_code": "waiting_for_report"}'
-ORPHANS_JSON = '{"objective": "check_for_orphans", "reason_code": "teammate_may_need_help"}'
-HOME_JSON = '{"objective": "return_home", "reason_code": "my_work_is_done"}'
+LISTEN_JSON = decision_json("listen", "waiting_for_report")
+ORPHANS_JSON = decision_json("check_for_orphans", "teammate_may_need_help")
+HOME_JSON = decision_json("return_home", "my_work_is_done")
 LEGAL = [Objective.LISTEN, Objective.CHECK_FOR_ORPHANS, Objective.RETURN_HOME]
 
 
@@ -69,29 +69,29 @@ class TestParseDecision(unittest.TestCase):
         self.assertEqual(self._kind('["return_home"]'), RejectionKind.MALFORMED_JSON)
 
     def test_made_up_objective_is_rejected(self):
-        self.assertEqual(self._kind('{"objective": "deploy_countermeasures", "reason_code": "my_work_is_done"}'),
+        self.assertEqual(self._kind(decision_json("deploy_countermeasures")),
                          RejectionKind.UNKNOWN_OBJECTIVE)
 
     def test_real_objective_that_is_not_offered_is_rejected(self):
         """take_off is a real Objective - but it is not on the menu at this moment."""
-        self.assertEqual(self._kind('{"objective": "take_off", "reason_code": "my_work_is_done"}'),
+        self.assertEqual(self._kind(decision_json("take_off")),
                          RejectionKind.UNKNOWN_OBJECTIVE)
 
     def test_unknown_field_is_an_error_not_ignored(self):
-        self.assertEqual(self._kind('{"objective": "return_home", "reason_code": "my_work_is_done", "x": 400}'),
+        self.assertEqual(self._kind(decision_json("return_home", x=400, y=400)),
                          RejectionKind.BAD_FIELDS)
 
     def test_missing_field_is_rejected(self):
-        self.assertEqual(self._kind('{"objective": "return_home"}'), RejectionKind.BAD_FIELDS)
+        self.assertEqual(self._kind('{"selected_tool": "return_home"}'), RejectionKind.BAD_FIELDS)
 
     def test_reason_code_outside_the_closed_list_is_rejected(self):
-        self.assertEqual(self._kind('{"objective": "return_home", "reason_code": "i_feel_like_it"}'),
+        self.assertEqual(self._kind(decision_json("return_home", "i_feel_like_it")),
                          RejectionKind.BAD_FIELDS)
 
     def test_the_model_cannot_carry_coordinates(self):
         """No field in the contract can hold a position at all."""
         self.assertNotIn("x", REASON_CODES)
-        self.assertEqual(self._kind('{"objective": "go_to_waypoint", "reason_code": "search_elsewhere", "x": 1, "y": 2}'),
+        self.assertEqual(self._kind(decision_json("go_to_waypoint", "search_elsewhere", x=1, y=2)),
                          RejectionKind.UNKNOWN_OBJECTIVE)   # not on this menu, so it cannot be chosen
 
 
@@ -153,12 +153,12 @@ class TestEveryFailureStillFliesTheAircraft(unittest.TestCase):
         self.assertEqual(p.records[0].rejected_as, "malformed_json")
 
     def test_unknown_objective_twice_falls_back(self):
-        bad = '{"objective": "land_on_the_moon", "reason_code": "my_work_is_done"}'
+        bad = decision_json("land_on_the_moon")
         p = self._expect_fallback(bad, bad)
         self.assertEqual(p.records[0].rejected_as, "unknown_objective")
 
     def test_bad_fields_twice_falls_back(self):
-        self._expect_fallback('{"objective": "return_home"}', '{"objective": "return_home"}')
+        self._expect_fallback('{"selected_tool": "return_home"}', '{"selected_tool": "return_home"}')
 
     def test_timeout_falls_back_immediately_without_a_retry(self):
         backend = ScriptedBackend([BackendTimeout("hung")], respond=None)
@@ -289,7 +289,7 @@ WAYPOINT_LEGAL = LEGAL + [Objective.GO_TO_WAYPOINT]
 
 
 def _wp(x, y):
-    return '{"objective": "go_to_waypoint", "reason_code": "search_elsewhere", "x": %s, "y": %s}' % (x, y)
+    return decision_json("go_to_waypoint", "search_elsewhere", x=x, y=y)
 
 
 class TestWaypointContract(unittest.TestCase):
@@ -303,23 +303,24 @@ class TestWaypointContract(unittest.TestCase):
         return ctx.exception.kind
 
     def test_boolean_is_never_accepted_as_a_number(self):
-        self.assertEqual(self._kind(_wp("true", 0)), RejectionKind.BAD_FIELDS)
+        self.assertEqual(self._kind(_wp(True, 0)), RejectionKind.BAD_FIELDS)
 
     def test_string_coordinate_is_rejected(self):
-        self.assertEqual(self._kind(_wp('"north"', 0)), RejectionKind.BAD_FIELDS)
+        self.assertEqual(self._kind(_wp("north", 0)), RejectionKind.BAD_FIELDS)
 
     def test_missing_coordinate_is_rejected(self):
-        raw = '{"objective": "go_to_waypoint", "reason_code": "search_elsewhere", "x": 5}'
+        raw = json.dumps({**json.loads(_wp(5, 6)),
+                          "parameters": {"reason_code": "search_elsewhere", "x": 5}})
         self.assertEqual(self._kind(raw), RejectionKind.BAD_FIELDS)
 
     def test_coordinates_on_any_other_objective_are_rejected(self):
-        raw = '{"objective": "return_home", "reason_code": "my_work_is_done", "x": 5, "y": 5}'
+        raw = decision_json("return_home", x=5, y=5)
         self.assertEqual(self._kind(raw), RejectionKind.BAD_FIELDS)
 
     def test_schema_does_not_judge_whether_a_point_is_safe(self):
         """A no-fly-zone point, a far-away point and NaN are all well-formed. Judging them is
         the guardian's job alone - a schema that pre-filtered them would hide them from it."""
-        for x, y in ((0, 50), (5000, 0), ("NaN", 0)):
+        for x, y in ((0, 50), (5000, 0), (float("nan"), 0)):
             parse_decision(_wp(x, y), WAYPOINT_LEGAL)
 
     def test_waypoint_is_only_offered_while_rounds_remain(self):
@@ -375,7 +376,7 @@ class TestUnsafeButValidModelOutput(unittest.TestCase):
         "inside_no_fly_zone": (0, 50),
         "outside_geofence": (5000, 0),
         "beyond_max_distance": (1000, 0),
-        "not_a_number": ("NaN", 0),
+        "not_a_number": (float("nan"), 0),
     }
 
     def test_every_unsafe_waypoint_is_blocked_before_the_vehicle_and_the_drone_lands(self):
@@ -484,11 +485,21 @@ class TestOllamaBackend(unittest.TestCase):
         self.assertEqual(body["format"], DECISION_SCHEMA)
 
     def test_schema_agrees_with_the_validator_contract(self):
+        from fics_drone.agents.decision_schema import (COMMUNICATION_STATUS, CURRENT_RISK, MISSION_PROGRESS,
+                                                       TOP_KEYS)
         props = DECISION_SCHEMA["properties"]
-        self.assertEqual(set(props["reason_code"]["enum"]), set(REASON_CODES))
-        self.assertTrue(set(props["objective"]["enum"]) <= {o.value for o in Objective})
-        self.assertEqual(set(DECISION_SCHEMA["required"]), {"objective", "reason_code"})
+        self.assertEqual(set(props), TOP_KEYS)
+        self.assertEqual(set(DECISION_SCHEMA["required"]), TOP_KEYS)
         self.assertFalse(DECISION_SCHEMA["additionalProperties"])
+        self.assertEqual(set(props["parameters"]["properties"]["reason_code"]["enum"]), set(REASON_CODES))
+        self.assertTrue(set(props["selected_tool"]["enum"]) <= {o.value for o in Objective})
+        a = props["situation_assessment"]["properties"]
+        self.assertEqual((set(a["mission_progress"]["enum"]), set(a["communication_status"]["enum"]),
+                          set(a["current_risk"]["enum"])),
+                         (set(MISSION_PROGRESS), set(COMMUNICATION_STATUS), set(CURRENT_RISK)))
+        # the decoder can only ever name the one message type a model is allowed to author
+        item = props["outgoing_messages"]["items"]["properties"]
+        self.assertEqual(item["message_type"]["enum"], ["help_request"])
 
     def test_card_records_the_digest_and_is_pinned(self):
         card = OllamaBackend("llama3.1:8b", host=self.host).card()

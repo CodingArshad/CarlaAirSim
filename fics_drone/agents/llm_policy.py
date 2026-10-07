@@ -24,7 +24,7 @@ event is recorded. Fallback is the design, not error handling.
 """
 
 from dataclasses import dataclass, field
-from typing import List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from .belief import Belief
 from .context_builder import build_prompt
@@ -57,6 +57,9 @@ class LLMDecisionRecord:
     raw_waypoint: Optional[Tuple[float, float]] = None   # what the model asked for (differs only if repaired)
     repaired: bool = False
     repair_distance_m: Optional[float] = None
+    assessment: Optional[Dict[str, str]] = None      # Phase 12.3: the model's own three-enum read of the situation
+    confidence: Optional[float] = None               # its self-reported 0..1 confidence; logged, never trusted
+    messages: List[dict] = field(default_factory=list)   # validated outgoing messages it asked to send
     rejected_as: Optional[str] = None   # RejectionKind value of the FIRST rejection, if any
     corrected: bool = False             # a rejection was fixed by the one correction
     prompts: List[str] = field(default_factory=list)
@@ -82,6 +85,7 @@ class LLMAgentPolicy:
         self.spawn_offset = spawn_offset        # this agent's own local->world offset, for the prompt
         self.waypoints_enabled = waypoints_enabled
         self._pending_waypoint: Optional[Tuple[float, float]] = None
+        self._pending_messages: Tuple = ()
         self.records: List[LLMDecisionRecord] = []   # THIS agent's own history only
         self._step = 0
 
@@ -102,6 +106,13 @@ class LLMAgentPolicy:
             return deterministic
 
         record.objective, record.reason_code = decision.objective, decision.reason_code
+        record.assessment = {"mission_progress": decision.assessment.mission_progress,
+                             "communication_status": decision.assessment.communication_status,
+                             "current_risk": decision.assessment.current_risk}
+        record.confidence = decision.confidence
+        record.messages = [{"message_type": m.type.value, "recipients": list(m.recipients),
+                            "payload": dict(m.payload)} for m in decision.messages]
+        self._pending_messages = decision.messages   # only a MODEL decision ever carries messages
         record.raw_waypoint = decision.waypoint
         flown = decision.waypoint
         if flown is not None and self.assist == "repair":
@@ -124,6 +135,12 @@ class LLMAgentPolicy:
         SearchAgentPolicy defines doesn't change shape for the deterministic case."""
         waypoint, self._pending_waypoint = self._pending_waypoint, None
         return waypoint
+
+    def take_messages(self) -> Tuple:
+        """Hand the agent the validated messages the model asked to send, once. A fallback decision
+        never has any: if the model's answer was rejected, nothing it wrote leaves the agent."""
+        messages, self._pending_messages = self._pending_messages, ()
+        return messages
 
     # --- what the model is and is not allowed to decide ---
     def _is_model_decision_point(self, belief: Belief, event: ReplanEvent) -> bool:
@@ -159,7 +176,7 @@ class LLMAgentPolicy:
             try:
                 raw = self.backend.complete(prompt, self.timeout_s)
                 record.raw_outputs.append(raw)
-                decision = parse_decision(raw, legal)
+                decision = parse_decision(raw, legal, list(belief.team.teammates))
                 record.corrected = attempt == 2
                 return decision
             except BackendTimeout:

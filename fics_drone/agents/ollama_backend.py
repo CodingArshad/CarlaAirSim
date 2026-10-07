@@ -23,26 +23,59 @@ import urllib.request
 from dataclasses import dataclass, asdict
 from typing import List, Optional
 
-from .decision_schema import REASON_CODES
+from .decision_schema import (COMMUNICATION_STATUS, CURRENT_RISK, MAX_OUTGOING_MESSAGES, MISSION_PROGRESS,
+                              MODEL_MESSAGE_TYPES, REASON_CODES, decision_json)
 from .llm_backends import BackendError, BackendTimeout, ModelBackend
 from .objectives import Objective
 
 DEFAULT_HOST = "http://localhost:11434"
 DEFAULT_SEED = 17
-MAX_NEW_TOKENS = 80   # a decision is one tiny JSON object; a long answer is a failure, not thoroughness
+MAX_NEW_TOKENS = 220   # one structured decision, even with messages; a long answer is a failure, not thoroughness
 
-# Every objective the contract can ever carry; which are LEGAL right now is the
-# validator's call (and the prompt's menu), not the decoder's.
+
+def _enum(values):
+    return {"type": "string", "enum": list(values)}
+
+
+# Every tool the contract can ever carry; which are LEGAL right now is the validator's call (and the
+# prompt's menu), not the decoder's. Constraining the decoder is a convenience - the strict validator in
+# decision_schema.py still runs on every output.
 DECISION_SCHEMA = {
     "type": "object",
     "properties": {
-        "objective": {"type": "string", "enum": [o.value for o in (
-            Objective.LISTEN, Objective.CHECK_FOR_ORPHANS, Objective.RETURN_HOME, Objective.GO_TO_WAYPOINT)]},
-        "reason_code": {"type": "string", "enum": list(REASON_CODES)},
-        "x": {"type": "number"},
-        "y": {"type": "number"},
+        "situation_assessment": {
+            "type": "object",
+            "properties": {"mission_progress": _enum(MISSION_PROGRESS),
+                           "communication_status": _enum(COMMUNICATION_STATUS),
+                           "current_risk": _enum(CURRENT_RISK)},
+            "required": ["mission_progress", "communication_status", "current_risk"],
+            "additionalProperties": False,
+        },
+        "selected_tool": _enum(o.value for o in (
+            Objective.LISTEN, Objective.CHECK_FOR_ORPHANS, Objective.RETURN_HOME, Objective.GO_TO_WAYPOINT)),
+        "parameters": {
+            "type": "object",
+            "properties": {"reason_code": _enum(REASON_CODES), "x": {"type": "number"}, "y": {"type": "number"}},
+            "required": ["reason_code"],
+            "additionalProperties": False,
+        },
+        "outgoing_messages": {
+            "type": "array", "maxItems": MAX_OUTGOING_MESSAGES,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "message_type": _enum(t.value for t in MODEL_MESSAGE_TYPES),
+                    "recipients": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                    "payload": {"type": "object", "properties": {"reason_code": _enum(REASON_CODES)},
+                                "required": ["reason_code"], "additionalProperties": False},
+                },
+                "required": ["message_type", "recipients", "payload"],
+                "additionalProperties": False,
+            },
+        },
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
     },
-    "required": ["objective", "reason_code"],
+    "required": ["situation_assessment", "selected_tool", "parameters", "outgoing_messages", "confidence"],
     "additionalProperties": False,
 }
 
@@ -101,8 +134,7 @@ class OllamaBackend(ModelBackend):
         decision isn't a cold start that blows its time budget. Returns seconds taken."""
         import time
         start = time.monotonic()
-        self.complete("Reply with the JSON object "
-                      '{"objective": "return_home", "reason_code": "my_work_is_done"}', timeout_s)
+        self.complete("Reply with exactly this JSON object: " + decision_json("return_home"), timeout_s)
         return time.monotonic() - start
 
     # --- ModelBackend ---

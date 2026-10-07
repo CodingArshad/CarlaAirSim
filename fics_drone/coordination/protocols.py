@@ -20,6 +20,9 @@ class MessageType(str, Enum):
     TARGET_FOUND = "target_found"  # broadcast once a sighting is confirmed
     TASK_BID = "task_bid"         # Phase 8: this agent's bid on a sector task
     TASK_CLAIM = "task_claim"     # Phase 8: this agent believes it won a task
+    HELP_REQUEST = "help_request"  # Phase 12.3: the ONLY type a model may author. Informational and
+    # low-privilege on purpose - receivers merely record it, so a model can never forge a protocol
+    # message (a fake TARGET_FOUND, a stolen TASK_CLAIM) by writing one.
     TASK_COMPLETE = "task_complete"  # Phase 9: this agent finished its own task - explicit,
     # because silence alone can't distinguish "finished and landed" from "died": both look
     # identical to a teammate as "stopped sending heartbeats"
@@ -36,6 +39,7 @@ TTL_BY_TYPE = {
     MessageType.TASK_BID: 30.0,
     MessageType.TASK_CLAIM: 300.0,
     MessageType.TASK_COMPLETE: 300.0,
+    MessageType.HELP_REQUEST: 120.0,
 }
 
 BROADCAST = None  # Message.recipients=None means "every other registered agent"

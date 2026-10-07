@@ -109,6 +109,7 @@ def run_probe(backend: ModelBackend, scenario: Scenario, n: int = 100, seed: int
 
 def _summarize(rec, point, v) -> dict:
     return {"source": rec.source, "objective": rec.objective.value, "rejected_as": rec.rejected_as,
+            "confidence": rec.confidence, "risk": (rec.assessment or {}).get("current_risk"),
             "waypoint": point, "legal": (v.legal if v is not None else None),
             "failed_checks": (v.failed_checks if v is not None else None)}
 
@@ -131,6 +132,10 @@ def summarize_probe(rows: List[dict]) -> dict:
             "waypoints": len(chosen),
             "raw_legal_rate": rate(raw_legal, len(chosen)),
         }
+        # Is the model's own confidence informative? (Only meaningful if both groups are non-empty.)
+        for label, want in (("legal", True), ("illegal", False)):
+            vals = [c["confidence"] for c in chosen if bool(c["legal"]) == want and c.get("confidence") is not None]
+            entry[f"mean_confidence_{label}"] = (sum(vals) / len(vals)) if vals else None
         if cond == "repair":
             flown_legal = sum(1 for c in chosen if c["flown_legal"])
             repaired = [c for c in chosen if c["repaired"]]

@@ -35,6 +35,7 @@ from .search_policy import SearchAgentPolicy
 
 MAX_STEPS = 500  # hard backstop against a future undiscovered infinite-loop bug in the policy -
 # a real mission finishes in well under 50 decision steps even with retries, so this is generous
+MAX_HELP_REQUESTS_KEPT = 5  # Phase 12.3: bounded, like every other thing shown to a model
 AGENT_REPORT_HOLD_S = 3.0  # how long THIS agent holds position to confirm a sighting - an agent-
 # owned protocol constant, deliberately not read from the scenario's Target.dwell_s (that would be
 # the same ground-truth leak Phase 6 exists to close, just moved to a different field)
@@ -155,6 +156,12 @@ class PersistentAgent:
             # GO_TO_WAYPOINT; the deterministic policy has no such method.
             take_waypoint = getattr(self.policy, "take_waypoint", None)
             self._pending_waypoint = take_waypoint() if take_waypoint else None
+            # Phase 12.3: messages the model authored, already validated (closed type, known
+            # recipients, closed payload). Sent before acting, like any other agent message.
+            take_messages = getattr(self.policy, "take_messages", None)
+            for m in (take_messages() if take_messages else ()):
+                if self.link:
+                    self.link.send(m.type, dict(m.payload), recipients=list(m.recipients))
             trace.append(f"{event.value}->{objective.value}")
             self.belief.phase = next_phase
             if self.logger:
@@ -297,6 +304,12 @@ class PersistentAgent:
                     self.belief.mission.targets_known[target_id] = TargetSighting(
                         target_id=target_id, local_position=local, first_seen_t=self.belief.elapsed_s,
                         confirmed=True, source="message")
+            elif msg.type == MessageType.HELP_REQUEST:
+                # Informational only: record it (capped), change nothing else. A request for help
+                # is never an order, and receiving one never alters this agent's task or tasks.
+                self.belief.communication.help_requests.append(
+                    (msg.sender, msg.payload.get("reason_code", "?"), self.belief.elapsed_s))
+                del self.belief.communication.help_requests[:-MAX_HELP_REQUESTS_KEPT]
             elif msg.type == MessageType.HEARTBEAT:
                 self.belief.team.teammates[msg.sender] = TeammateRecord(
                     name=msg.sender, last_known_position=msg.payload["position"],

@@ -21,7 +21,14 @@ def summarize(policies: Dict[str, object], agents: Dict[str, object]) -> dict:
             chosen[r.objective.value] = chosen.get(r.objective.value, 0) + 1
     guardian = [e for a in agents.values() for e in a.guardian_log.entries]
     blocked = [e for e in guardian if e.outcome == "reject_and_replan"]
+    model = [r for r in records if r.source == "model" and r.assessment is not None]
+    risk: Dict[str, int] = {}
+    for r in model:
+        risk[r.assessment["current_risk"]] = risk.get(r.assessment["current_risk"], 0) + 1
     return {
+        "assessed_risk": risk,
+        "mean_confidence": (sum(r.confidence for r in model) / len(model)) if model else None,
+        "messages_sent": sum(len(r.messages) for r in model),
         "model_owned_decisions": len(records),
         "fallback": sum(1 for r in records if r.source == "fallback"),
         "fallback_rate": (sum(1 for r in records if r.source == "fallback") / len(records)) if records else 0.0,
@@ -46,6 +53,7 @@ def save_run(directory: str, policies: Dict[str, object], agents: Dict[str, obje
                     "step": r.step, "source": r.source, "objective": r.objective.value,
                     "reason_code": r.reason_code, "waypoint": r.waypoint, "raw_waypoint": r.raw_waypoint,
                     "repaired": r.repaired, "repair_distance_m": r.repair_distance_m,
+                    "assessment": r.assessment, "confidence": r.confidence, "messages": r.messages,
                     "rejected_as": r.rejected_as,
                     "corrected": r.corrected, "prompts": r.prompts, "raw_outputs": r.raw_outputs,
                 } for r in policy.records],

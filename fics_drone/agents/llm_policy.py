@@ -5,16 +5,18 @@ and the Phase 11 SafetyGuardian are completely unchanged and none of them
 know a model exists. Everything that made the deterministic system safe still
 sits downstream of the model.
 
-The model owns exactly ONE decision point, chosen by a rule: it decides only
-when both answers are safe and the choice cannot loop forever or strand a
-drone. After an agent has finished its own sector and lingered at least one
-round, it picks from {listen again, check for orphaned work, return home}.
-Everything else - take-off, climbing, search legs, retries, low battery,
-landing, "mission over" - is a FACT, decided by the deterministic policy.
+The model owns ONE decision point, chosen by a rule: it decides only when
+both answers are safe and the choice cannot loop forever or strand a drone.
+After an agent has finished its own sector and lingered at least one round, it
+picks from a menu of the fifteen tools in llm_tools.py - but only the ones the
+CODE offers right now (offered_tools(): preconditions, valid task ids, known
+recipients, a hard cap on model actions). Everything else - take-off, climbing,
+search legs, retries, low battery, landing, "mission over" - is a FACT, decided
+by the deterministic policy.
 
-One option, go_to_waypoint, carries model-supplied coordinates (world x, y;
+One tool, go_to_waypoint, carries model-supplied coordinates (world x, y;
 altitude stays code-owned). It is the only way model output can ever name a
-position, it consumes one of the same code-capped rounds as listening, and the
+position, it consumes one of the same code-capped rounds as holding, and the
 flight it triggers goes through the SafetyGuardian like every other command -
 this is what gives the guardian something real to catch from a model.
 
@@ -31,6 +33,7 @@ from .context_builder import build_prompt
 from .decision_schema import (CORRECTABLE, Decision, DecisionRejected, RejectionKind,
                               parse_decision)
 from .llm_backends import BackendError, BackendTimeout, ModelBackend
+from .llm_tools import MAX_MODEL_ACTIONS, offered_tools
 from .objectives import Objective, ReplanEvent
 from .reasoning_tools import ReasoningTools
 from .search_policy import SearchAgentPolicy
@@ -41,9 +44,11 @@ ASSIST_MODES = ("off", "context", "repair")
 # What each model-chosen objective means as the agent's next phase.
 OBJECTIVE_PHASE = {
     Objective.LISTEN: "listening",
-    Objective.CHECK_FOR_ORPHANS: "checking_for_orphans",
     Objective.RETURN_HOME: "returning",
     Objective.GO_TO_WAYPOINT: "repositioning",
+    Objective.SEARCH_SECTOR: "searching",
+    Objective.REPORT: "reporting",
+    Objective.TOOL_ACTION: "coordinating",
 }
 
 
@@ -53,6 +58,8 @@ class LLMDecisionRecord:
     source: str                      # "model" | "fallback"
     objective: Objective
     reason_code: Optional[str] = None
+    tool: Optional[str] = None                       # which of the 15 tools the model selected
+    args: Dict[str, object] = field(default_factory=dict)   # its validated tool parameters
     waypoint: Optional[Tuple[float, float]] = None   # world (x, y) actually FLOWN, only for go_to_waypoint
     raw_waypoint: Optional[Tuple[float, float]] = None   # what the model asked for (differs only if repaired)
     repaired: bool = False
@@ -71,7 +78,7 @@ class LLMAgentPolicy:
                  timeout_s: float = DEFAULT_TIMEOUT_S, sectors: Sequence = (),
                  spawn_offset: Tuple[float, float, float] = (0.0, 0.0, 0.0),
                  waypoints_enabled: bool = True, assist: str = "off",
-                 tools: Optional[ReasoningTools] = None):
+                 tools: Optional[ReasoningTools] = None, max_model_actions: int = MAX_MODEL_ACTIONS):
         if assist not in ASSIST_MODES:
             raise ValueError(f"assist must be one of {ASSIST_MODES}, got {assist!r}")
         if assist != "off" and tools is None:
@@ -84,7 +91,9 @@ class LLMAgentPolicy:
         self.sectors = tuple(sectors)           # mission geometry shown in the prompt (no target locations)
         self.spawn_offset = spawn_offset        # this agent's own local->world offset, for the prompt
         self.waypoints_enabled = waypoints_enabled
+        self.max_model_actions = max_model_actions
         self._pending_waypoint: Optional[Tuple[float, float]] = None
+        self._pending_action: Optional[Tuple[str, dict]] = None
         self._pending_messages: Tuple = ()
         self.records: List[LLMDecisionRecord] = []   # THIS agent's own history only
         self._step = 0
@@ -96,9 +105,9 @@ class LLMAgentPolicy:
             return deterministic
 
         self._step += 1
-        legal = self._legal_options(belief)
+        offered = self._offered(belief)
         record = LLMDecisionRecord(step=self._step, source="model", objective=deterministic[0])
-        decision = self._ask(belief, event, legal, record)
+        decision = self._ask(belief, event, offered, record)
         if decision is None:
             record.source = "fallback"
             record.objective = deterministic[0]
@@ -106,6 +115,9 @@ class LLMAgentPolicy:
             return deterministic
 
         record.objective, record.reason_code = decision.objective, decision.reason_code
+        record.tool, record.args = decision.tool, dict(decision.args)
+        self._pending_action = (decision.tool, {**decision.args, "reason_code": decision.reason_code})
+        # (only a MODEL decision ever carries an action; a fallback decision never does)
         record.assessment = {"mission_progress": decision.assessment.mission_progress,
                              "communication_status": decision.assessment.communication_status,
                              "current_risk": decision.assessment.current_risk}
@@ -136,6 +148,12 @@ class LLMAgentPolicy:
         waypoint, self._pending_waypoint = self._pending_waypoint, None
         return waypoint
 
+    def take_action(self) -> Optional[Tuple[str, dict]]:
+        """Hand the agent (tool name, validated args) for the model decision just made, once. None for
+        a fallback decision: if the model's answer was rejected, nothing it asked for happens."""
+        action, self._pending_action = self._pending_action, None
+        return action
+
     def take_messages(self) -> Tuple:
         """Hand the agent the validated messages the model asked to send, once. A fallback decision
         never has any: if the model's answer was rejected, nothing it wrote leaves the agent."""
@@ -144,7 +162,7 @@ class LLMAgentPolicy:
 
     # --- what the model is and is not allowed to decide ---
     def _is_model_decision_point(self, belief: Belief, event: ReplanEvent) -> bool:
-        if belief.phase not in ("listening", "repositioning"):
+        if belief.phase not in ("listening", "repositioning", "coordinating"):
             return False
         if event in (ReplanEvent.SKILL_FAILED, ReplanEvent.TARGET_DETECTED):
             return False                                  # facts, not judgments
@@ -152,31 +170,27 @@ class LLMAgentPolicy:
             return False                                  # low battery is a fact, never delegated
         return True
 
-    def _legal_options(self, belief: Belief) -> List[Objective]:
-        legal = []
-        # Hard cap owned by code: the model cannot choose to linger forever.
-        if belief.listen_rounds < self.fallback.listen_rounds:
-            legal.append(Objective.LISTEN)
-            if self.waypoints_enabled:
-                legal.append(Objective.GO_TO_WAYPOINT)
-        legal += [Objective.CHECK_FOR_ORPHANS, Objective.RETURN_HOME]
-        return legal
+    def _offered(self, belief: Belief):
+        """The menu, owned by code: which of the fifteen tools are legal right now, and the values each
+        parameter may take. A hard cap on model actions guarantees the model cannot loop."""
+        return offered_tools(belief, listen_cap=self.fallback.listen_rounds,
+                             max_actions=self.max_model_actions, waypoints_enabled=self.waypoints_enabled)
 
     # --- one turn: ask, validate, correct once if worthwhile, else give up (-> fallback) ---
-    def _ask(self, belief: Belief, event: ReplanEvent, legal: List[Objective],
+    def _ask(self, belief: Belief, event: ReplanEvent, offered,
              record: LLMDecisionRecord) -> Optional[Decision]:
         correction = None
         for attempt in (1, 2):
             checked = (self.tools.checked_points(belief)
-                       if self.assist == "context" and Objective.GO_TO_WAYPOINT in legal else ())
-            prompt = build_prompt(belief, event, legal, self.fallback.listen_rounds, correction,
+                       if self.assist == "context" and "go_to_waypoint" in offered else ())
+            prompt = build_prompt(belief, event, offered, self.fallback.listen_rounds, correction,
                                   sectors=self.sectors, spawn_offset=self.spawn_offset,
                                   checked_points=checked)
             record.prompts.append(prompt)
             try:
                 raw = self.backend.complete(prompt, self.timeout_s)
                 record.raw_outputs.append(raw)
-                decision = parse_decision(raw, legal, list(belief.team.teammates))
+                decision = parse_decision(raw, offered, list(belief.team.teammates))
                 record.corrected = attempt == 2
                 return decision
             except BackendTimeout:

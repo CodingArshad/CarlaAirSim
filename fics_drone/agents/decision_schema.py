@@ -2,8 +2,8 @@
 returns one structured JSON object:
 
     {"situation_assessment": {"mission_progress": ..., "communication_status": ..., "current_risk": ...},
-     "selected_tool": "<an option the code offered right now>",
-     "parameters": {"reason_code": "<closed list>", ["x": .., "y": ..]},
+     "selected_tool": "<one of the 15 tools, and only if the code offered it right now>",
+     "parameters": {"reason_code": "<closed list>", <the tool's own parameters, if any>},
      "outgoing_messages": [{"message_type": "help_request", "recipients": [...], "payload": {...}}],
      "confidence": 0.0 - 1.0}
 
@@ -31,6 +31,7 @@ from enum import Enum
 from typing import Any, Dict, Optional, Sequence, Tuple
 
 from ..coordination.protocols import MessageType
+from .llm_tools import BY_NAME, Offered
 from .objectives import Objective
 
 # Closed list on purpose.
@@ -95,27 +96,31 @@ class OutgoingMessage:
 
 @dataclass(frozen=True)
 class Decision:
-    objective: Objective
+    objective: Objective              # what the agent executes (derived from the tool, never from the model)
     reason_code: str
     assessment: Assessment
     confidence: float
+    tool: str = ""                    # the registry tool the model selected
+    args: Dict[str, Any] = field(default_factory=dict)   # validated tool parameters (task_id, recipients, ...)
     waypoint: Optional[Tuple[float, float]] = None   # world (x, y); only for go_to_waypoint
     messages: Tuple[OutgoingMessage, ...] = ()
 
 
-def decision_json(objective, reason_code: str = "my_work_is_done", x=None, y=None, *,
+def decision_json(tool, reason_code: str = "my_work_is_done", x=None, y=None, *, params: Optional[dict] = None,
                   assessment: Optional[dict] = None, confidence: Any = 0.8, messages: Sequence = ()) -> str:
     """Build a well-formed model answer (for scripted backends, tests and demos). Any argument can
-    be deliberately wrong - pass a bool for x, a bad enum in `assessment` - to build a bad answer."""
-    value = objective.value if isinstance(objective, Objective) else objective
-    params: Dict[str, Any] = {"reason_code": reason_code}
+    be deliberately wrong - pass a bool for x, a bad enum in `assessment` - to build a bad answer.
+    `params` adds tool-specific parameters, e.g. {"task_id": "search_B"}."""
+    value = tool.value if isinstance(tool, Objective) else tool
+    parameters: Dict[str, Any] = {"reason_code": reason_code}
     if x is not None or y is not None:
-        params["x"], params["y"] = x, y
+        parameters["x"], parameters["y"] = x, y
+    parameters.update(params or {})
     return json.dumps({
         "situation_assessment": assessment or {"mission_progress": "partial",
                                                "communication_status": "good", "current_risk": "low"},
         "selected_tool": value,
-        "parameters": params,
+        "parameters": parameters,
         "outgoing_messages": list(messages),
         "confidence": confidence,
     })
@@ -172,7 +177,29 @@ def _parse_messages(data, teammates: Sequence[str]) -> Tuple[OutgoingMessage, ..
     return tuple(out)
 
 
-def parse_decision(raw: str, legal: Sequence[Objective], teammates: Sequence[str] = ()) -> Decision:
+def _check_param(tool_name: str, key: str, value, choices: Optional[Tuple]):
+    """Validate one tool parameter against the values the CODE offered for it."""
+    if key in ("x", "y"):
+        if not _is_number(value):
+            _reject(RejectionKind.BAD_FIELDS, f"{key} must be a number")
+        return float(value)
+    if key == "recipients":
+        if not isinstance(value, list) or not value or not all(isinstance(v, str) for v in value):
+            _reject(RejectionKind.BAD_FIELDS, "recipients must be a non-empty list of drone names")
+        if len(set(value)) != len(value):
+            _reject(RejectionKind.BAD_FIELDS, "recipients must not repeat a drone")
+        bad = [v for v in value if v not in (choices or ())]
+        if bad:
+            _reject(RejectionKind.BAD_FIELDS, f"unknown recipient(s) {bad}; valid for {tool_name}: {list(choices or ())}")
+        return tuple(value)
+    # task_id / target_id / new_role: a string that is one of the values offered right now
+    if not isinstance(value, str) or value not in (choices or ()):
+        _reject(RejectionKind.BAD_FIELDS, f"{key} {value!r} is not valid for {tool_name}; valid: {list(choices or ())}")
+    return value
+
+
+def parse_decision(raw: str, offered: Offered, teammates: Sequence[str] = ()) -> Decision:
+    """`offered` is what the CODE put on the menu this turn: tool name -> {parameter: allowed values}."""
     try:
         data = json.loads(raw)
     except (TypeError, ValueError) as exc:
@@ -190,36 +217,31 @@ def parse_decision(raw: str, legal: Sequence[Objective], teammates: Sequence[str
 
     assessment = _parse_assessment(data["situation_assessment"])
 
-    tool, params = data["selected_tool"], data["parameters"]
-    if not isinstance(tool, str):
+    name, params = data["selected_tool"], data["parameters"]
+    if not isinstance(name, str):
         _reject(RejectionKind.BAD_FIELDS, "selected_tool must be a string")
     if not isinstance(params, dict):
         _reject(RejectionKind.BAD_FIELDS, "parameters must be an object")
-    wants_waypoint = tool == Objective.GO_TO_WAYPOINT.value
-    allowed = BASE_PARAM_KEYS | (WAYPOINT_PARAM_KEYS if wants_waypoint else set())
+    if name not in BY_NAME or name not in offered:
+        _reject(RejectionKind.UNKNOWN_OBJECTIVE, f"{name!r} is not one of the offered tools {sorted(offered)}")
+
+    tool, choices = BY_NAME[name], offered[name]
+    allowed = BASE_PARAM_KEYS | set(tool.params)
     p_extra, p_missing = set(params) - allowed, allowed - set(params)
     if p_extra:
-        _reject(RejectionKind.BAD_FIELDS, f"unknown parameter(s) for {tool}: {sorted(p_extra)}")
+        _reject(RejectionKind.BAD_FIELDS, f"unknown parameter(s) for {name}: {sorted(p_extra)}")
     if p_missing:
-        _reject(RejectionKind.BAD_FIELDS, f"missing parameter(s) for {tool}: {sorted(p_missing)}")
+        _reject(RejectionKind.BAD_FIELDS, f"missing parameter(s) for {name}: {sorted(p_missing)}")
     reason = params["reason_code"]
     if not isinstance(reason, str) or reason not in REASON_CODES:
         _reject(RejectionKind.BAD_FIELDS, f"reason_code {reason!r} not in the allowed list")
 
-    legal_names = [o.value for o in legal]
-    if tool not in legal_names:
-        _reject(RejectionKind.UNKNOWN_OBJECTIVE, f"{tool!r} is not one of the offered options {legal_names}")
-
-    waypoint = None
-    if wants_waypoint:
-        # Type check ONLY. Whether the point is sensible (finite, in range, inside the geofence,
-        # outside a no-fly zone, away from teammates) is deliberately NOT judged here: that is the
-        # SafetyGuardian's job alone, and a schema that pre-filtered unsafe coordinates would hide
-        # from it exactly the commands it exists to catch.
-        for key in ("x", "y"):
-            if not _is_number(params[key]):
-                _reject(RejectionKind.BAD_FIELDS, f"{key} must be a number")
-        waypoint = (float(params["x"]), float(params["y"]))
+    # Type and membership only. Whether a waypoint is sensible (finite, in range, inside the geofence,
+    # outside a no-fly zone, away from teammates) is deliberately NOT judged here: that is the
+    # SafetyGuardian's job alone, and a schema that pre-filtered unsafe coordinates would hide from it
+    # exactly the commands it exists to catch.
+    checked = {key: _check_param(name, key, params[key], choices.get(key)) for key in tool.params}
+    waypoint = (checked.pop("x"), checked.pop("y")) if "x" in checked else None
 
     messages = _parse_messages(data["outgoing_messages"], teammates)
 
@@ -227,5 +249,5 @@ def parse_decision(raw: str, legal: Sequence[Objective], teammates: Sequence[str
     if not _is_number(confidence) or not math.isfinite(confidence) or not 0.0 <= confidence <= 1.0:
         _reject(RejectionKind.BAD_FIELDS, "confidence must be a number from 0 to 1")
 
-    return Decision(objective=Objective(tool), reason_code=reason, assessment=assessment,
-                    confidence=float(confidence), waypoint=waypoint, messages=messages)
+    return Decision(objective=tool.objective, reason_code=reason, assessment=assessment,
+                    confidence=float(confidence), tool=name, args=checked, waypoint=waypoint, messages=messages)

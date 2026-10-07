@@ -26,18 +26,18 @@ from typing import List, Optional
 from .decision_schema import (COMMUNICATION_STATUS, CURRENT_RISK, MAX_OUTGOING_MESSAGES, MISSION_PROGRESS,
                               MODEL_MESSAGE_TYPES, REASON_CODES, decision_json)
 from .llm_backends import BackendError, BackendTimeout, ModelBackend
-from .objectives import Objective
+from .llm_tools import ROLES, TOOLS
 
 DEFAULT_HOST = "http://localhost:11434"
 DEFAULT_SEED = 17
-MAX_NEW_TOKENS = 220   # one structured decision, even with messages; a long answer is a failure, not thoroughness
+MAX_NEW_TOKENS = 450   # one structured decision; 220 truncated answers that listed a message per teammate (unterminated JSON -> forced fallback), so the cap must clear the longest legitimate answer
 
 
 def _enum(values):
     return {"type": "string", "enum": list(values)}
 
 
-# Every tool the contract can ever carry; which are LEGAL right now is the validator's call (and the
+# Every one of the fifteen tools the contract can ever carry; which are LEGAL right now is the validator's call (and the
 # prompt's menu), not the decoder's. Constraining the decoder is a convenience - the strict validator in
 # decision_schema.py still runs on every output.
 DECISION_SCHEMA = {
@@ -51,11 +51,15 @@ DECISION_SCHEMA = {
             "required": ["mission_progress", "communication_status", "current_risk"],
             "additionalProperties": False,
         },
-        "selected_tool": _enum(o.value for o in (
-            Objective.LISTEN, Objective.CHECK_FOR_ORPHANS, Objective.RETURN_HOME, Objective.GO_TO_WAYPOINT)),
+        "selected_tool": _enum(t.name for t in TOOLS),
         "parameters": {
             "type": "object",
-            "properties": {"reason_code": _enum(REASON_CODES), "x": {"type": "number"}, "y": {"type": "number"}},
+            # the union of every parameter any tool can take; WHICH tool takes which, and which VALUES are
+            # valid right now, is the validator's call (decision_schema.parse_decision), not the decoder's
+            "properties": {"reason_code": _enum(REASON_CODES), "x": {"type": "number"}, "y": {"type": "number"},
+                           "task_id": {"type": "string"}, "target_id": {"type": "string"},
+                           "new_role": _enum(ROLES),
+                           "recipients": {"type": "array", "items": {"type": "string"}, "minItems": 1}},
             "required": ["reason_code"],
             "additionalProperties": False,
         },

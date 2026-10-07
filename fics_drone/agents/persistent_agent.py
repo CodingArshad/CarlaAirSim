@@ -27,6 +27,7 @@ from ..experiments.mission_runner import lawnmower_waypoints
 from .belief import Belief, SearchLeg
 from .belief_schema import MissionBelief, Provenance, SelfState, TargetSighting, TeammateRecord
 from .comms_estimator import CommsEstimator
+from .llm_tools import BY_NAME
 from .decision_log import DecisionLogger
 from .ground_truth import SensorModel
 from .objectives import Objective, ReplanEvent
@@ -36,6 +37,7 @@ from .search_policy import SearchAgentPolicy
 MAX_STEPS = 500  # hard backstop against a future undiscovered infinite-loop bug in the policy -
 # a real mission finishes in well under 50 decision steps even with retries, so this is generous
 MAX_HELP_REQUESTS_KEPT = 5  # Phase 12.3: bounded, like every other thing shown to a model
+MAX_MARKET_KEPT = 5  # Phase 12 (15-tool set): same bound for announcements, bids and offers
 AGENT_REPORT_HOLD_S = 3.0  # how long THIS agent holds position to confirm a sighting - an agent-
 # owned protocol constant, deliberately not read from the scenario's Target.dwell_s (that would be
 # the same ground-truth leak Phase 6 exists to close, just moved to a different field)
@@ -99,6 +101,7 @@ class PersistentAgent:
         self.guardian = guardian or SafetyGuardian(limits=SafetyLimits.from_scenario(scenario))
         self.guardian_log = GuardianLog()
         self._pending_waypoint = None  # Phase 12: coordinates for a model-chosen GO_TO_WAYPOINT, one-shot
+        self._pending_action = None  # Phase 12 (15-tool set): (tool, validated args) the model just chose, one-shot
         self.sensor = SensorModel(scenario)  # the ONLY thing here allowed to read scenario.targets
         self.logger = logger
         self.drone_name = drone_name
@@ -151,11 +154,19 @@ class PersistentAgent:
 
             self._observe_messages()  # "observe" now includes anything teammates delivered
 
+            self._refresh_task_view()  # a bounded snapshot of THIS agent's own board, for the model's prompt
             objective, next_phase = self.policy.decide(self.belief, event)
             # Phase 12: only an LLM policy ever has coordinates to hand over, and only for
             # GO_TO_WAYPOINT; the deterministic policy has no such method.
             take_waypoint = getattr(self.policy, "take_waypoint", None)
             self._pending_waypoint = take_waypoint() if take_waypoint else None
+            # Phase 12 (15-tool set): which tool the model chose and with what validated arguments. Every
+            # tool except the progress-making ones (start_search, report_target, return_home) costs one of
+            # the hard-capped model actions - that cap is what guarantees a model cannot loop.
+            take_action = getattr(self.policy, "take_action", None)
+            self._pending_action = take_action() if take_action else None
+            if self._pending_action is not None and not BY_NAME[self._pending_action[0]].free:
+                self.belief.self_state.model_actions += 1
             # Phase 12.3: messages the model authored, already validated (closed type, known
             # recipients, closed payload). Sent before acting, like any other agent message.
             take_messages = getattr(self.policy, "take_messages", None)
@@ -235,6 +246,8 @@ class PersistentAgent:
             self.belief.position = result.final_position or self.belief.position
             unconfirmed = [s for s in self.belief.mission.targets_known.values()
                            if not s.confirmed and s.source == "sensor"]
+            wanted = (self._pending_action[1].get("target_id") if self._pending_action else None)
+            unconfirmed = [t for t in unconfirmed if t.target_id == wanted] or unconfirmed
             if unconfirmed:
                 sighting = unconfirmed[0]
                 sighting.confirmed = True
@@ -259,6 +272,9 @@ class PersistentAgent:
 
         if objective == Objective.CHECK_FOR_ORPHANS:
             return self._check_for_orphans()
+
+        if objective == Objective.TOOL_ACTION:
+            return self._execute_tool()
 
         if objective == Objective.GO_TO_WAYPOINT:
             # Consumes one of the code-capped listen rounds whether or not the flight succeeds,
@@ -310,6 +326,32 @@ class PersistentAgent:
                 self.belief.communication.help_requests.append(
                     (msg.sender, msg.payload.get("reason_code", "?"), self.belief.elapsed_s))
                 del self.belief.communication.help_requests[:-MAX_HELP_REQUESTS_KEPT]
+            elif msg.type == MessageType.TASK_ANNOUNCE and self.task_board:
+                # A teammate says a task it holds is up for bids. Recorded, nothing more: hearing an
+                # announcement never obliges this agent to bid, and never changes the board.
+                tid = msg.payload.get("task_id")
+                if tid in self.task_board.tasks and msg.sender != self.drone_name:
+                    comm = self.belief.communication
+                    comm.announced_tasks = [e for e in comm.announced_tasks if e[0] != tid] + \
+                        [(tid, msg.sender, self.belief.elapsed_s)]
+                    del comm.announced_tasks[:-MAX_MARKET_KEPT]
+            elif msg.type == MessageType.TASK_BID and self.task_board:
+                tid = msg.payload.get("task_id")
+                if tid in self.task_board.tasks and msg.sender != self.drone_name:
+                    bid = float(msg.payload["bid"])
+                    self.task_board.apply_bid(tid, msg.sender, bid)
+                    comm = self.belief.communication
+                    comm.bids_received.append((tid, msg.sender, bid, self.belief.elapsed_s))
+                    del comm.bids_received[:-MAX_MARKET_KEPT]
+            elif msg.type == MessageType.TASK_RELEASE and self.task_board:
+                tid = msg.payload.get("task_id")
+                if tid in self.task_board.tasks and self.task_board.apply_release(
+                        tid, msg.sender, int(msg.payload["version"])):
+                    comm = self.belief.communication
+                    comm.announced_tasks = [e for e in comm.announced_tasks if e[0] != tid]
+                    if msg.payload.get("awarded_to") == self.drone_name:
+                        comm.offers_to_me.append((tid, msg.sender, self.belief.elapsed_s))
+                        del comm.offers_to_me[:-MAX_MARKET_KEPT]
             elif msg.type == MessageType.HEARTBEAT:
                 self.belief.team.teammates[msg.sender] = TeammateRecord(
                     name=msg.sender, last_known_position=msg.payload["position"],
@@ -330,6 +372,48 @@ class PersistentAgent:
                 # acceptance rule as the original Phase 8 allocation round.
                 self.task_board.apply_claim(msg.payload["task_id"], msg.sender, msg.payload["bid"],
                                              msg.payload["version"], self.belief.elapsed_s, DEFAULT_LEASE_S)
+                # someone took it: it is no longer announced or on offer to this agent
+                comm = self.belief.communication
+                tid = msg.payload["task_id"]
+                comm.announced_tasks = [e for e in comm.announced_tasks if e[0] != tid]
+                comm.offers_to_me = [e for e in comm.offers_to_me if e[0] != tid]
+
+    def _release_failed_holders(self):
+        """Phase 9's lease short-circuit: a task held by a teammate HealthMonitor classifies FAILED
+        becomes available immediately, not after waiting out the full lease (FICS's bug #3). Shared by
+        the deterministic orphan check AND the model's task view, so a model sees a dead drone's work
+        as unheld exactly when the deterministic policy would."""
+        if not self.task_board or not self.health_monitor:
+            return
+        now = self.belief.elapsed_s
+        for name, record in list(self.belief.team.teammates.items()):
+            if self.health_monitor.classify(record, now) == HealthState.FAILED:
+                for task_id in list(self.task_board.tasks):
+                    self.task_board.release_if_failed(task_id, name)
+
+    def _claim(self, task_id: str) -> bool:
+        """Take an unheld task: bid (a deterministic cost - no model ever picks a number), claim it on this
+        agent's own board, tell the team, queue its sector. Used by the deterministic orphan check and by
+        the model's claim_task / accept_task alike, so there is exactly one way to take work."""
+        now = self.belief.elapsed_s
+        task = self.task_board.tasks[task_id]
+        sector = self.scenario.sector(task.sector_id)
+        bid = compute_bid(_to_world(self.belief.position, self.spawn_offset),
+                          self.belief.battery_frac_remaining, workload=0, sector=sector,
+                          role_mismatch=self._role_mismatch(), weights=DEFAULT_WEIGHTS)
+        version = self.task_board.next_version(task_id)
+        accepted = self.task_board.apply_claim(task_id, self.drone_name, bid, version, now, DEFAULT_LEASE_S)
+        if accepted:
+            if self.link:
+                self.link.send(MessageType.TASK_CLAIM, {"task_id": task_id, "bid": bid, "version": version})
+            self.belief.mission.sector_id = task.sector_id
+            self.belief.mission.search_queue = _build_search_queue(sector, self.spawn_offset, self.cruise_height)
+            self.belief.listen_rounds = 0  # the new sector gets its own full listen window later
+        return accepted
+
+    def _role_mismatch(self) -> float:
+        """Only a scout does scouting work; a relay or reserve bidding on a search task is a mismatch."""
+        return 0.0 if self.belief.self_state.role == "scout" else 1.0
 
     def _check_for_orphans(self) -> ReplanEvent:
         """Phase 9's actual 'team changes shape' behavior. Reclassifies every
@@ -342,33 +426,148 @@ class PersistentAgent:
         still listening)."""
         if not self.task_board or not self.health_monitor:
             return ReplanEvent.SKILL_SUCCEEDED  # no Phase 9 wiring - behave exactly like Phase 7
+        if self.belief.self_state.role != "scout":
+            return ReplanEvent.SKILL_SUCCEEDED  # a relay or reserve doesn't pick up search work
 
         now = self.belief.elapsed_s
-        for name, record in list(self.belief.team.teammates.items()):
-            if self.health_monitor.classify(record, now) == HealthState.FAILED:
-                for task_id in list(self.task_board.tasks):
-                    self.task_board.release_if_failed(task_id, name)
+        self._release_failed_holders()
 
         own_sector = self.belief.mission.sector_id
+        declined = set(self.belief.communication.declined_tasks)
         for task_id, task in self.task_board.tasks.items():
-            if task.sector_id == own_sector or task.status == TaskStatus.COMPLETE:
+            if task.sector_id == own_sector or task.status == TaskStatus.COMPLETE or task_id in declined:
                 continue
             if self.task_board.held_by(task_id, now) is not None:
                 continue  # someone genuinely still holds it
-            sector = self.scenario.sector(task.sector_id)
-            bid = compute_bid(_to_world(self.belief.position, self.spawn_offset),
-                               self.belief.battery_frac_remaining, workload=0, sector=sector,
-                               weights=DEFAULT_WEIGHTS)
-            version = self.task_board.next_version(task_id)
-            accepted = self.task_board.apply_claim(task_id, self.drone_name, bid, version, now, DEFAULT_LEASE_S)
-            if accepted:
-                if self.link:
-                    self.link.send(MessageType.TASK_CLAIM, {"task_id": task_id, "bid": bid, "version": version})
-                self.belief.mission.sector_id = task.sector_id
-                self.belief.mission.search_queue = _build_search_queue(sector, self.spawn_offset, self.cruise_height)
-                self.belief.listen_rounds = 0  # the new sector gets its own full listen window later
+            if self._claim(task_id):
                 return ReplanEvent.NEW_TASK_ASSIGNED
         return ReplanEvent.SKILL_SUCCEEDED
+
+    # ---- Phase 12 (15-tool set): the board snapshot and the coordination / information tools ----
+    def _refresh_task_view(self):
+        """A bounded snapshot of THIS agent's own board for the model's prompt - the policy never
+        touches the board itself. Applies the same dead-holder short-circuit the deterministic orphan
+        check uses first, so the model sees a failed drone's work as unheld at the same moment."""
+        if not self.task_board:
+            return
+        self._release_failed_holders()
+        now = self.belief.elapsed_s
+        view = []
+        for task_id, task in self.task_board.tasks.items():
+            if task.status == TaskStatus.COMPLETE:
+                view.append((task_id, task.sector_id, "complete", task.assignee))
+            elif task.assignee == self.drone_name:
+                view.append((task_id, task.sector_id, "mine", self.drone_name))
+            elif self.task_board.held_by(task_id, now) is None:
+                view.append((task_id, task.sector_id, "unheld", None))
+            else:
+                view.append((task_id, task.sector_id, "held", task.assignee))
+        self.belief.team.task_view = view
+
+    def _own_bid(self, task_id: str) -> float:
+        task = self.task_board.tasks[task_id]
+        workload = sum(1 for t in self.task_board.claimed_by(self.drone_name)
+                       if self.task_board.tasks[t].status != TaskStatus.COMPLETE)
+        return compute_bid(_to_world(self.belief.position, self.spawn_offset), self.belief.battery_frac_remaining,
+                           workload=workload, sector=self.scenario.sector(task.sector_id),
+                           role_mismatch=self._role_mismatch(), weights=DEFAULT_WEIGHTS)
+
+    def _execute_tool(self) -> ReplanEvent:
+        """Run the coordination/information tool the model chose. Every precondition is re-checked HERE
+        - the menu was built a moment ago, but belief and board can change between menu and action - and
+        every message is built by code from this agent's own board: a model never authors a payload."""
+        if self._pending_action is None:
+            return ReplanEvent.SKILL_FAILED
+        tool, args = self._pending_action
+        s, comm, board = self.belief.self_state, self.belief.communication, self.task_board
+        task_id = args.get("task_id")
+
+        def fail(why: str) -> ReplanEvent:
+            s.last_tool_result = f"{tool} did nothing: {why}"
+            return ReplanEvent.SKILL_FAILED
+
+        def done(what: str) -> ReplanEvent:
+            s.last_tool_result = what
+            return ReplanEvent.SKILL_SUCCEEDED
+
+        if tool == "change_role":
+            s.role = args["new_role"]
+            self._send_heartbeat()
+            return done(f"you are now a {s.role}")
+
+        if tool == "act_as_relay":
+            s.role = "relay"
+            result = hold_position(self.adapter, LISTEN_HOLD_S)
+            self.belief.position = result.final_position or self.belief.position
+            self.belief.listen_rounds += 1
+            self._send_heartbeat()
+            return done("holding station as a relay") if result.status == SkillStatus.SUCCESS else fail("hold failed")
+
+        if tool == "request_help":
+            if self.link:
+                self.link.send(MessageType.HELP_REQUEST, {"reason_code": args.get("reason_code", "teammate_may_need_help")},
+                               recipients=list(args["recipients"]))
+            return done(f"asked {', '.join(args['recipients'])} for help")
+
+        if board is None or task_id not in board.tasks:
+            return fail("no such task on your board")
+        task, now = board.tasks[task_id], self.belief.elapsed_s
+
+        if tool == "compute_task_cost":
+            return done(f"your cost for {task_id} is {self._own_bid(task_id):.1f} (lower is better)")
+
+        if tool == "announce_task":
+            if task.assignee != self.drone_name or task.status != TaskStatus.CLAIMED:
+                return fail("you do not hold that task")
+            if self.link:
+                self.link.send(MessageType.TASK_ANNOUNCE, {"task_id": task_id})
+            return done(f"announced {task_id}; teammates may bid")
+
+        if tool == "send_bid":
+            announcer = next((who for t, who, _ in comm.announced_tasks if t == task_id), None)
+            if announcer is None or task.assignee == self.drone_name:
+                return fail("that task was not announced by a teammate")
+            bid = self._own_bid(task_id)
+            board.apply_bid(task_id, self.drone_name, bid)
+            comm.bids_sent.append(task_id)
+            if self.link:
+                self.link.send(MessageType.TASK_BID, {"task_id": task_id, "bid": bid}, recipients=[announcer])
+            return done(f"bid {bid:.1f} on {task_id}")
+
+        if tool == "release_task":
+            version = board.release(task_id, self.drone_name)
+            if version is None:
+                return fail("you do not hold that task, or it is already complete")
+            others = {b: v for b, v in board.bids_for(task_id).items() if b != self.drone_name}
+            winner = min(others, key=lambda b: (others[b], b)) if others else None   # deterministic award
+            if self.link:
+                self.link.send(MessageType.TASK_RELEASE,
+                               {"task_id": task_id, "version": version, "awarded_to": winner})
+            if task.sector_id == self.belief.mission.sector_id:
+                self.belief.mission.search_queue = []   # I no longer hold this sector, so I will not sweep it
+            comm.announced_tasks = [e for e in comm.announced_tasks if e[0] != task_id]
+            return done(f"released {task_id}" + (f", offered to {winner} (best bid)" if winner else ", nobody had bid"))
+
+        if tool in ("claim_task", "accept_task"):
+            if task.status == TaskStatus.COMPLETE or task.assignee == self.drone_name \
+                    or board.held_by(task_id, now) is not None:
+                return fail("that task is not available")
+            if tool == "accept_task" and not any(t == task_id for t, _, _ in comm.offers_to_me):
+                return fail("that task was not released to you")
+            if not self._claim(task_id):
+                return fail("a better claim already exists")
+            comm.offers_to_me = [e for e in comm.offers_to_me if e[0] != task_id]
+            comm.announced_tasks = [e for e in comm.announced_tasks if e[0] != task_id]
+            return done(f"you now hold {task_id}; its sector is queued")
+
+        if tool == "decline_task":
+            if not any(t == task_id for t, _, _ in comm.offers_to_me):
+                return fail("that task was not released to you")
+            comm.offers_to_me = [e for e in comm.offers_to_me if e[0] != task_id]
+            comm.declined_tasks.append(task_id)
+            return done(f"declined {task_id}; it stays open and you will not auto-claim it")
+
+        return fail("unknown tool")
 
     def _sense_after_arrival(self) -> ReplanEvent:
         """The only place a target can enter belief: a real sensor reading at
@@ -454,4 +653,5 @@ class PersistentAgent:
         if self.link:
             self.link.send(MessageType.HEARTBEAT,
                             {"position": _to_world(self.belief.position, self.spawn_offset),
-                             "battery_frac": self.belief.battery_frac_remaining})
+                             "battery_frac": self.belief.battery_frac_remaining,
+                             "role": self.belief.self_state.role})

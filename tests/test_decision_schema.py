@@ -27,7 +27,7 @@ from fics_drone.experiments.team_runner import run_team_with_faults
 from fics_drone.simulator.kinematic_mock_adapter import KinematicMockVehicleAdapter
 
 SCENARIO_PATH = os.path.join(os.path.dirname(__file__), "..", "configs", "missions", "search_relay_001.json")
-LEGAL = [Objective.LISTEN, Objective.CHECK_FOR_ORPHANS, Objective.RETURN_HOME, Objective.GO_TO_WAYPOINT]
+LEGAL = {"hold": {}, "return_home": {}, "go_to_waypoint": {"x": None, "y": None}}   # the code-built menu
 TEAM = ["Drone1", "Drone2", "Drone3"]
 
 
@@ -53,12 +53,12 @@ def _belief(teammates=("Drone1", "Drone2")):
 
 class TestWellFormedDecision(unittest.TestCase):
     def test_a_full_decision_is_parsed_into_typed_fields(self):
-        raw = decision_json("check_for_orphans", "teammate_may_need_help",
+        raw = decision_json("hold", "teammate_may_need_help",
                             assessment={"mission_progress": "partial", "communication_status": "degraded",
                                         "current_risk": "medium"},
                             confidence=0.78, messages=[_msg(recipients=("Drone2", "Drone3"))])
         d = parse_decision(raw, LEGAL, TEAM)
-        self.assertEqual(d.objective, Objective.CHECK_FOR_ORPHANS)
+        self.assertEqual(d.objective, Objective.LISTEN)
         self.assertEqual((d.assessment.mission_progress, d.assessment.communication_status,
                           d.assessment.current_risk), ("partial", "degraded", "medium"))
         self.assertAlmostEqual(d.confidence, 0.78)
@@ -287,7 +287,7 @@ class TestTeamEndToEnd(unittest.TestCase):
     def test_help_requests_are_delivered_recorded_and_change_nothing_else(self):
         def respond(prompt):
             who = _first_teammate(prompt)
-            return decision_json("check_for_orphans", "teammate_may_need_help",
+            return decision_json("return_home", "teammate_may_need_help",
                                  messages=[_msg(recipients=(who,))] if who else [])
 
         scenario, reports, agents, bus, policies = self._run(respond)
@@ -304,7 +304,7 @@ class TestTeamEndToEnd(unittest.TestCase):
             who = _first_teammate(prompt)
             forged = {"message_type": "target_found", "recipients": [who],
                       "payload": {"target_id": "T9", "world_position": [0, 0, 0]}}
-            return decision_json("check_for_orphans", messages=[forged] if who else [])
+            return decision_json("return_home", messages=[forged] if who else [])
 
         scenario, reports, agents, bus, policies = self._run(respond)
         for a in agents.values():
@@ -315,7 +315,7 @@ class TestTeamEndToEnd(unittest.TestCase):
 
     def test_summary_reports_confidence_risk_and_messages(self):
         def respond(prompt):
-            return decision_json("check_for_orphans", confidence=0.6,
+            return decision_json("return_home", confidence=0.6,
                                  assessment={"mission_progress": "partial", "communication_status": "good",
                                              "current_risk": "medium"})
 

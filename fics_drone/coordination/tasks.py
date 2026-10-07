@@ -163,6 +163,34 @@ class TaskBoard:
             return True
         return False
 
+    def release(self, task_id: str, agent_name: str) -> Optional[int]:
+        """The HOLDER gives its own unfinished task back. Returns the new Lamport version (one higher
+        than anything seen), or None if this agent doesn't hold it or it is already complete. The
+        version keeps counting up for the same reason release_if_failed's does: a later re-claim must
+        beat any stale message still in flight that references the old claim."""
+        task = self.tasks[task_id]
+        if task.assignee != agent_name or task.status != TaskStatus.CLAIMED:
+            return None
+        task.version += 1
+        task.status = TaskStatus.OPEN
+        task.assignee = None
+        task.winning_bid = None
+        task.lease_expires_at = None
+        return task.version
+
+    def apply_release(self, task_id: str, sender: str, version: int) -> bool:
+        """Another agent's TASK_RELEASE. Accepted only if the sender is who this board believes holds
+        the task and the version is newer - a stale or forged release cannot free someone else's work."""
+        task = self.tasks.get(task_id)
+        if task is None or task.assignee != sender or task.status != TaskStatus.CLAIMED or version <= task.version:
+            return False
+        task.version = version
+        task.status = TaskStatus.OPEN
+        task.assignee = None
+        task.winning_bid = None
+        task.lease_expires_at = None
+        return True
+
     def greedy_global_assignment(self, own_name: str, own_bids: Dict[str, float]) -> Dict[str, str]:
         """One-to-one, not one task independently winner-picked per task -
         the naive per-task version let a single drone be the cheapest

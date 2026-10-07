@@ -20,6 +20,9 @@ class Objective(str, Enum):
     # coordinates (world x, y only - altitude stays code-owned). Offered only at the model's single
     # decision point, consumes one of the code-capped listen rounds, and is guardian-checked like
     # every other flight command.
+    TOOL_ACTION = "tool_action"  # Phase 12 (15-tool set): a model-chosen coordination/information tool
+    # (claim, release, announce, bid, accept, decline, cost, role, relay, help). No motion except
+    # act_as_relay's hold; the agent dispatches on the tool name the policy handed over.
     RETURN_HOME = "return_home"
     LAND = "land"
     DONE = "done"

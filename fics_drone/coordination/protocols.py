@@ -23,6 +23,9 @@ class MessageType(str, Enum):
     HELP_REQUEST = "help_request"  # Phase 12.3: the ONLY type a model may author. Informational and
     # low-privilege on purpose - receivers merely record it, so a model can never forge a protocol
     # message (a fake TARGET_FOUND, a stolen TASK_CLAIM) by writing one.
+    TASK_ANNOUNCE = "task_announce"  # Phase 12 (15-tool set): "a task I hold is up for bids" - built by
+    # code from the sender's own board, never authored by a model
+    TASK_RELEASE = "task_release"  # Phase 12: a holder gives a task up (awarded_to = the lowest bidder, if any)
     TASK_COMPLETE = "task_complete"  # Phase 9: this agent finished its own task - explicit,
     # because silence alone can't distinguish "finished and landed" from "died": both look
     # identical to a teammate as "stopped sending heartbeats"
@@ -40,6 +43,8 @@ TTL_BY_TYPE = {
     MessageType.TASK_CLAIM: 300.0,
     MessageType.TASK_COMPLETE: 300.0,
     MessageType.HELP_REQUEST: 120.0,
+    MessageType.TASK_ANNOUNCE: 120.0,
+    MessageType.TASK_RELEASE: 300.0,
 }
 
 BROADCAST = None  # Message.recipients=None means "every other registered agent"

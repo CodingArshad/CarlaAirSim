@@ -69,8 +69,14 @@ class SearchAgentPolicy:
             # a fact, handled exactly like finding one mid-sweep.
             return Objective.REPORT, "reporting"
 
-        if belief.phase in ("listening", "repositioning"):
-            # (repositioning = the model flew somewhere on its own; same bounded-linger rules apply)
+        if belief.phase == "coordinating" and belief.search_queue and event != ReplanEvent.SKILL_FAILED:
+            # Phase 12 (15-tool set): a coordination tool (claim_task / accept_task) left this agent
+            # holding an unsearched sector. Holding work you haven't done is a fact, so if the model
+            # doesn't choose start_search itself (or fails), the deterministic answer is to search it.
+            return Objective.SEARCH_SECTOR, "searching"
+
+        if belief.phase in ("listening", "repositioning", "coordinating"):
+            # (repositioning/coordinating = the model acted on its own; same bounded-linger rules apply)
             # _observe_messages() already updated belief directly for anything delivered this
             # round (no event needed - a secondhand sighting doesn't require this agent to also
             # report it). Just linger a bounded number of rounds, then check for orphaned work

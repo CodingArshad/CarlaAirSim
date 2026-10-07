@@ -21,6 +21,7 @@ from fics_drone.agents.decision_schema import (DecisionRejected, REASON_CODES, R
                                                decision_json, parse_decision)
 from fics_drone.agents.llm_backends import BackendError, BackendTimeout, ScriptedBackend
 from fics_drone.agents.llm_policy import LLMAgentPolicy, make_policy_factory
+from fics_drone.agents.llm_tools import BY_NAME
 from fics_drone.agents.persistent_agent import PersistentAgent
 from fics_drone.agents.objectives import Objective, ReplanEvent
 from fics_drone.agents.ollama_backend import DECISION_SCHEMA, ModelCard, OllamaBackend
@@ -34,10 +35,9 @@ from fics_drone.simulator.kinematic_mock_adapter import KinematicMockVehicleAdap
 SCENARIO_PATH = os.path.join(os.path.dirname(__file__), "..", "configs", "missions",
                               "search_relay_001.json")
 
-LISTEN_JSON = decision_json("listen", "waiting_for_report")
-ORPHANS_JSON = decision_json("check_for_orphans", "teammate_may_need_help")
+LISTEN_JSON = decision_json("hold", "waiting_for_report")
 HOME_JSON = decision_json("return_home", "my_work_is_done")
-LEGAL = [Objective.LISTEN, Objective.CHECK_FOR_ORPHANS, Objective.RETURN_HOME]
+LEGAL = {"hold": {}, "return_home": {}}   # what the code offered, as parse_decision wants it
 
 
 def _belief(phase="listening", listen_rounds=1, battery_s=100.0, elapsed_s=0.0):
@@ -124,7 +124,7 @@ class TestDecisionOwnership(unittest.TestCase):
 
     def test_model_cannot_linger_past_the_code_owned_cap(self):
         cap = SearchAgentPolicy().listen_rounds
-        policy = _policy(LISTEN_JSON, LISTEN_JSON, ORPHANS_JSON)   # asks to listen though it's exhausted
+        policy = _policy(LISTEN_JSON, LISTEN_JSON, HOME_JSON)   # asks to hold though the rounds are exhausted
         objective, _ = policy.decide(_belief(listen_rounds=cap), ReplanEvent.SKILL_SUCCEEDED)
         self.assertNotEqual(objective, Objective.LISTEN)
 
@@ -219,7 +219,7 @@ class TestBoundedPrompt(unittest.TestCase):
         backend = ScriptedBackend([HOME_JSON], respond=None)
         cap = SearchAgentPolicy().listen_rounds
         LLMAgentPolicy(backend).decide(_belief(listen_rounds=cap), ReplanEvent.SKILL_SUCCEEDED)
-        self.assertNotIn("- listen:", backend.prompts[0])
+        self.assertNotIn("- hold:", backend.prompts[0])
         self.assertIn("- return_home:", backend.prompts[0])
 
 
@@ -285,7 +285,7 @@ class TestFourAgentsOneBackend(unittest.TestCase):
         self.assertTrue(all(p.fallback_rate == 1.0 for p in policies.values() if p.records))
 
 
-WAYPOINT_LEGAL = LEGAL + [Objective.GO_TO_WAYPOINT]
+WAYPOINT_LEGAL = {**LEGAL, "go_to_waypoint": {"x": None, "y": None}}
 
 
 def _wp(x, y):
@@ -492,7 +492,7 @@ class TestOllamaBackend(unittest.TestCase):
         self.assertEqual(set(DECISION_SCHEMA["required"]), TOP_KEYS)
         self.assertFalse(DECISION_SCHEMA["additionalProperties"])
         self.assertEqual(set(props["parameters"]["properties"]["reason_code"]["enum"]), set(REASON_CODES))
-        self.assertTrue(set(props["selected_tool"]["enum"]) <= {o.value for o in Objective})
+        self.assertEqual(set(props["selected_tool"]["enum"]), set(BY_NAME))   # exactly the fifteen tools
         a = props["situation_assessment"]["properties"]
         self.assertEqual((set(a["mission_progress"]["enum"]), set(a["communication_status"]["enum"]),
                           set(a["current_risk"]["enum"])),

@@ -108,7 +108,7 @@ def run_probe(backend: ModelBackend, scenario: Scenario, n: int = 100, seed: int
 
 
 def _summarize(rec, point, v) -> dict:
-    return {"source": rec.source, "objective": rec.objective.value, "rejected_as": rec.rejected_as,
+    return {"source": rec.source, "objective": rec.tool or rec.objective.value, "rejected_as": rec.rejected_as,
             "confidence": rec.confidence, "risk": (rec.assessment or {}).get("current_risk"),
             "waypoint": point, "legal": (v.legal if v is not None else None),
             "failed_checks": (v.failed_checks if v is not None else None)}

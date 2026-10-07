@@ -9,6 +9,7 @@ guardian still holding - is testable against scripted answers,
 deterministically, with no GPU and no Ollama installed.
 """
 
+import re
 import threading
 from abc import ABC, abstractmethod
 from typing import Callable, Optional, Sequence, Union
@@ -31,13 +32,15 @@ class ModelBackend(ABC):
 
 
 def default_script(prompt: str) -> str:
-    """A sensible stand-in for a model. Waits while nobody has reported a
-    target to us yet (if waiting is offered), otherwise offers to help a
-    teammate. Reads the same prompt a real model would - no side channel."""
-    waiting_offered = "- listen:" in prompt
-    if waiting_offered and "second_hand_targets: 0" in prompt:
-        return decision_json("listen", "waiting_for_report")
-    return decision_json("check_for_orphans", "teammate_may_need_help")
+    """A sensible stand-in for a model, reading the same prompt a real model would (no side channel).
+    Waits while nobody has reported a target to us yet (if waiting is offered); otherwise takes an
+    unheld task if the menu offers one; otherwise goes home."""
+    if "- hold:" in prompt and "second_hand_targets: 0" in prompt:
+        return decision_json("hold", "waiting_for_report")
+    claim = re.search(r"- claim_task:.*?one of \['([^']+)'", prompt)
+    if claim:
+        return decision_json("claim_task", "teammate_may_need_help", params={"task_id": claim.group(1)})
+    return decision_json("return_home", "my_work_is_done")
 
 
 class ScriptedBackend(ModelBackend):

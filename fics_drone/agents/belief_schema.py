@@ -26,6 +26,11 @@ class SelfState:
     phase: str = "pre_takeoff"
     nav_retries: int = 0
     listen_rounds: int = 0  # Phase 7: how many times this agent has lingered post-search for messages
+    role: str = "scout"  # Phase 12 (15-tool set): scout | relay | reserve (coordination/roles.py's Role);
+    # a model may change it, and it genuinely matters - only a scout bids on or claims search tasks
+    model_actions: int = 0  # how many non-terminal tools the model has used: the hard cap that
+    # guarantees a model cannot claim/release/hold its way into a loop
+    last_tool_result: Optional[str] = None  # what the last information/coordination tool returned, shown next turn
     last_block_reason: Optional[str] = None  # Phase 12: why the SafetyGuardian refused this agent's
     # most recent flight command, in the guardian's own words - purely informational, shown to a model
     # policy so it can stop re-proposing the same unsafe thing. Cleared by the next approved flight.
@@ -95,11 +100,19 @@ class TeammateRecord:
 @dataclass
 class TeamBelief:
     teammates: Dict[str, TeammateRecord] = field(default_factory=dict)
+    task_view: List[Tuple[str, str, str, Optional[str]]] = field(default_factory=list)  # (task_id, sector_id,
+    # state, holder) with state in mine | held | unheld | complete - a bounded snapshot of THIS agent's own
+    # board, refreshed by the agent before each decision; the policy never touches the board itself
 
 
 @dataclass
 class CommunicationBelief:
     last_report_sent: Optional[str] = None  # target_id last reported, Phase 7 gives this a real destination
+    announced_tasks: List[Tuple[str, str, float]] = field(default_factory=list)  # (task_id, announcer, t), capped
+    bids_received: List[Tuple[str, str, float, float]] = field(default_factory=list)  # (task_id, bidder, bid, t)
+    offers_to_me: List[Tuple[str, str, float]] = field(default_factory=list)  # (task_id, releasing agent, t)
+    declined_tasks: List[str] = field(default_factory=list)  # tasks this agent turned down (never auto-claimed)
+    bids_sent: List[str] = field(default_factory=list)  # task_ids this agent already bid on
     help_requests: List[Tuple[str, str, float]] = field(default_factory=list)  # Phase 12.3: (sender,
     # reason_code, elapsed_s) of the most recent HELP_REQUESTs received, capped - purely informational
 

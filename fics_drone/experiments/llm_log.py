@@ -18,7 +18,8 @@ def summarize(policies: Dict[str, object], agents: Dict[str, object]) -> dict:
     chosen: Dict[str, int] = {}
     for r in records:
         if r.source == "model":
-            chosen[r.objective.value] = chosen.get(r.objective.value, 0) + 1
+            key = r.tool or r.objective.value
+            chosen[key] = chosen.get(key, 0) + 1
     guardian = [e for a in agents.values() for e in a.guardian_log.entries]
     blocked = [e for e in guardian if e.outcome == "reject_and_replan"]
     model = [r for r in records if r.source == "model" and r.assessment is not None]
@@ -50,7 +51,7 @@ def save_run(directory: str, policies: Dict[str, object], agents: Dict[str, obje
             json.dump({
                 "drone": name, "model_card": card,
                 "decisions": [{
-                    "step": r.step, "source": r.source, "objective": r.objective.value,
+                    "step": r.step, "source": r.source, "objective": r.objective.value, "tool": r.tool, "args": r.args,
                     "reason_code": r.reason_code, "waypoint": r.waypoint, "raw_waypoint": r.raw_waypoint,
                     "repaired": r.repaired, "repair_distance_m": r.repair_distance_m,
                     "assessment": r.assessment, "confidence": r.confidence, "messages": r.messages,

@@ -64,7 +64,13 @@ class SearchAgentPolicy:
                 return Objective.LISTEN, "listening"
             return Objective.SEARCH_SECTOR, "searching"
 
-        if belief.phase == "listening":
+        if belief.phase == "repositioning" and event == ReplanEvent.TARGET_DETECTED:
+            # Phase 12: a model-chosen waypoint ended somewhere the sensor sees a target -
+            # a fact, handled exactly like finding one mid-sweep.
+            return Objective.REPORT, "reporting"
+
+        if belief.phase in ("listening", "repositioning"):
+            # (repositioning = the model flew somewhere on its own; same bounded-linger rules apply)
             # _observe_messages() already updated belief directly for anything delivered this
             # round (no event needed - a secondhand sighting doesn't require this agent to also
             # report it). Just linger a bounded number of rounds, then check for orphaned work

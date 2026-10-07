@@ -97,6 +97,7 @@ class PersistentAgent:
         # own class with its own tests, just no longer what a real agent flies with.
         self.guardian = guardian or SafetyGuardian(limits=SafetyLimits.from_scenario(scenario))
         self.guardian_log = GuardianLog()
+        self._pending_waypoint = None  # Phase 12: coordinates for a model-chosen GO_TO_WAYPOINT, one-shot
         self.sensor = SensorModel(scenario)  # the ONLY thing here allowed to read scenario.targets
         self.logger = logger
         self.drone_name = drone_name
@@ -150,6 +151,10 @@ class PersistentAgent:
             self._observe_messages()  # "observe" now includes anything teammates delivered
 
             objective, next_phase = self.policy.decide(self.belief, event)
+            # Phase 12: only an LLM policy ever has coordinates to hand over, and only for
+            # GO_TO_WAYPOINT; the deterministic policy has no such method.
+            take_waypoint = getattr(self.policy, "take_waypoint", None)
+            self._pending_waypoint = take_waypoint() if take_waypoint else None
             trace.append(f"{event.value}->{objective.value}")
             self.belief.phase = next_phase
             if self.logger:
@@ -247,6 +252,21 @@ class PersistentAgent:
 
         if objective == Objective.CHECK_FOR_ORPHANS:
             return self._check_for_orphans()
+
+        if objective == Objective.GO_TO_WAYPOINT:
+            # Consumes one of the code-capped listen rounds whether or not the flight succeeds,
+            # so a model cannot keep proposing waypoints forever (the Phase 8 infinite-loop lesson).
+            self.belief.listen_rounds += 1
+            if self._pending_waypoint is None:
+                return ReplanEvent.SKILL_FAILED
+            wx, wy = self._pending_waypoint
+            self._pending_waypoint = None
+            # World (x, y) from the model; altitude is code-owned, never the model's to choose.
+            local_target = _to_local((wx, wy, self.cruise_height + self.spawn_offset[2]), self.spawn_offset)
+            event = self._guarded_fly(local_target, trace)
+            if event != ReplanEvent.SKILL_SUCCEEDED:
+                return event
+            return self._sense_after_arrival()  # somewhere new: a real sensor reading, as always
 
         if objective == Objective.RETURN_HOME:
             return self._guarded_fly((0.0, 0.0, DEFAULT_HEIGHT), trace, purpose="home")
@@ -369,6 +389,7 @@ class PersistentAgent:
         self.guardian_log.record(len(self.guardian_log.entries), command, evaluation)
 
         if evaluation.outcome == GuardianOutcome.REJECT_AND_REPLAN:
+            self.belief.self_state.last_block_reason = evaluation.reason
             trace.append(f"guardian_blocked({evaluation.reason})")
             return ReplanEvent.GUARDIAN_BLOCKED
 
@@ -384,6 +405,7 @@ class PersistentAgent:
 
         # APPROVE or APPROVE_WITH_MODIFICATION - fly whatever the guardian actually approved,
         # which may differ from what was proposed (e.g. altitude clamped into the envelope).
+        self.belief.self_state.last_block_reason = None
         final_local = _to_local(evaluation.command.target, self.spawn_offset)
         result = go_to_waypoint(self.adapter, *final_local)
         self.belief.position = result.final_position or self.belief.position

@@ -148,14 +148,19 @@ def run_team_with_allocation(scenario: Scenario, adapters: Dict[str, object], bu
 
 def run_team_with_faults(scenario: Scenario, adapters: Dict[str, object], bus: MessageBus = None,
                           loggers: Dict[str, DecisionLogger] = None, kill_name: str = None,
-                          kill_at_s: float = None, heartbeat_interval_s: float = DEFAULT_HEARTBEAT_INTERVAL_S):
+                          kill_at_s: float = None, heartbeat_interval_s: float = DEFAULT_HEARTBEAT_INTERVAL_S,
+                          policy_factory=None):
     """Phase 9 exit criterion: one drone is switched off mid-mission - no
     flight, no sensing, no heartbeats, nobody told. The survivors detect the
     silence, reclaim its sector, and finish. Same allocate-then-fly shape as
     run_team_with_allocation, but keeps each agent's TaskBoard alive into the
     flight phase and gives every agent a shared-shape HealthMonitor, so
     PersistentAgent's own _check_for_orphans logic actually has something to
-    work with."""
+    work with.
+
+    Phase 12: `policy_factory(drone_name)` returns that drone's OWN policy object
+    (e.g. an LLMAgentPolicy over one shared backend); None keeps the deterministic
+    default, so every earlier caller is unchanged."""
     bus = bus or MessageBus()
     links = {spec.name: AgentLink(bus, spec.name) for spec in scenario.drones}
 
@@ -173,7 +178,8 @@ def run_team_with_faults(scenario: Scenario, adapters: Dict[str, object], bus: M
             adapters[spec.name], scenario, sector_id, spec.spawn_offset, spec.battery_s,
             logger=logger, drone_name=spec.name, link=links[spec.name],
             task_board=boards[spec.name], health_monitor=HealthMonitor(heartbeat_interval_s),
-            kill_at_s=this_kill_at_s)
+            kill_at_s=this_kill_at_s,
+            policy=policy_factory(spec.name) if policy_factory else None)
 
     def fly_one(name):
         reports[name] = agents[name].run()

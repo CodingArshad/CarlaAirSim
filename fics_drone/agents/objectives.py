@@ -16,6 +16,10 @@ class Objective(str, Enum):
     CHECK_FOR_ORPHANS = "check_for_orphans"  # Phase 9: after listening, before heading home -
     # is there a teammate's task that's unheld (lease lapsed, or its holder is believed failed)?
     # Picking this up instead of going home is the actual "team changes shape" behavior.
+    GO_TO_WAYPOINT = "go_to_waypoint"  # Phase 12: the ONE objective that carries model-supplied
+    # coordinates (world x, y only - altitude stays code-owned). Offered only at the model's single
+    # decision point, consumes one of the code-capped listen rounds, and is guardian-checked like
+    # every other flight command.
     RETURN_HOME = "return_home"
     LAND = "land"
     DONE = "done"

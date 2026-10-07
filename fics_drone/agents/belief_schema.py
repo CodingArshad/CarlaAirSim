@@ -26,6 +26,9 @@ class SelfState:
     phase: str = "pre_takeoff"
     nav_retries: int = 0
     listen_rounds: int = 0  # Phase 7: how many times this agent has lingered post-search for messages
+    last_block_reason: Optional[str] = None  # Phase 12: why the SafetyGuardian refused this agent's
+    # most recent flight command, in the guardian's own words - purely informational, shown to a model
+    # policy so it can stop re-proposing the same unsafe thing. Cleared by the next approved flight.
 
     @property
     def battery_frac_remaining(self) -> float:

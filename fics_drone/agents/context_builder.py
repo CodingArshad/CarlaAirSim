@@ -24,7 +24,8 @@ OPTION_MEANING = {
 
 def build_prompt(belief: Belief, event: ReplanEvent, legal: Sequence[Objective],
                  listen_cap: int, correction: Optional[str] = None,
-                 sectors: Sequence = (), spawn_offset: Tuple[float, float, float] = (0.0, 0.0, 0.0)) -> str:
+                 sectors: Sequence = (), spawn_offset: Tuple[float, float, float] = (0.0, 0.0, 0.0),
+                 checked_points: Sequence[str] = ()) -> str:
     own = [s for s in belief.mission.targets_known.values() if s.source == "sensor"]
     second_hand = [s for s in belief.mission.targets_known.values() if s.source != "sensor"]
 
@@ -42,6 +43,11 @@ def build_prompt(belief: Belief, event: ReplanEvent, legal: Sequence[Objective],
                      f"- you are at ({pos[0] + spawn_offset[0]:.0f}, {pos[1] + spawn_offset[1]:.0f})",
                      *[f"- sector {s.id}: x {s.x_min:.0f}..{s.x_max:.0f}, y {s.y_min:.0f}..{s.y_max:.0f}"
                        for s in sectors[:8]]]
+        if checked_points:
+            # Phase 12.5: computed by code (reasoning_tools.py), so the model reads verdicts
+            # instead of doing distance arithmetic it is bad at.
+            map_lines += ["CHECKED POINTS (already computed by code; you do not need to calculate anything)",
+                          *list(checked_points)[:8]]
 
     lines = [
         "You are one drone in a search team. Your own sector is already finished.",

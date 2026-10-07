@@ -32,9 +32,11 @@ from .decision_schema import (CORRECTABLE, Decision, DecisionRejected, Rejection
                               parse_decision)
 from .llm_backends import BackendError, BackendTimeout, ModelBackend
 from .objectives import Objective, ReplanEvent
+from .reasoning_tools import ReasoningTools
 from .search_policy import SearchAgentPolicy
 
 DEFAULT_TIMEOUT_S = 20.0
+ASSIST_MODES = ("off", "context", "repair")
 
 # What each model-chosen objective means as the agent's next phase.
 OBJECTIVE_PHASE = {
@@ -51,7 +53,10 @@ class LLMDecisionRecord:
     source: str                      # "model" | "fallback"
     objective: Objective
     reason_code: Optional[str] = None
-    waypoint: Optional[Tuple[float, float]] = None   # world (x, y), only for go_to_waypoint
+    waypoint: Optional[Tuple[float, float]] = None   # world (x, y) actually FLOWN, only for go_to_waypoint
+    raw_waypoint: Optional[Tuple[float, float]] = None   # what the model asked for (differs only if repaired)
+    repaired: bool = False
+    repair_distance_m: Optional[float] = None
     rejected_as: Optional[str] = None   # RejectionKind value of the FIRST rejection, if any
     corrected: bool = False             # a rejection was fixed by the one correction
     prompts: List[str] = field(default_factory=list)
@@ -62,7 +67,14 @@ class LLMAgentPolicy:
     def __init__(self, backend: ModelBackend, fallback: Optional[SearchAgentPolicy] = None,
                  timeout_s: float = DEFAULT_TIMEOUT_S, sectors: Sequence = (),
                  spawn_offset: Tuple[float, float, float] = (0.0, 0.0, 0.0),
-                 waypoints_enabled: bool = True):
+                 waypoints_enabled: bool = True, assist: str = "off",
+                 tools: Optional[ReasoningTools] = None):
+        if assist not in ASSIST_MODES:
+            raise ValueError(f"assist must be one of {ASSIST_MODES}, got {assist!r}")
+        if assist != "off" and tools is None:
+            raise ValueError(f"assist={assist!r} needs ReasoningTools")
+        self.assist = assist     # off | context (show pre-computed facts) | repair (snap to nearest legal point)
+        self.tools = tools
         self.backend = backend
         self.fallback = fallback or SearchAgentPolicy()
         self.timeout_s = timeout_s
@@ -90,8 +102,19 @@ class LLMAgentPolicy:
             return deterministic
 
         record.objective, record.reason_code = decision.objective, decision.reason_code
-        record.waypoint = decision.waypoint
-        self._pending_waypoint = decision.waypoint
+        record.raw_waypoint = decision.waypoint
+        flown = decision.waypoint
+        if flown is not None and self.assist == "repair":
+            # The model's raw point is kept in the record; what gets FLOWN is the nearest point the
+            # guardian would accept. If none exists nearby, the raw point goes through and the
+            # guardian blocks it - honest, rather than inventing somewhere to fly.
+            repaired = self.tools.nearest_legal_point(belief, flown)
+            if repaired is not None and repaired != flown:
+                record.repaired = True
+                record.repair_distance_m = self.tools.distance(flown, repaired)
+                flown = repaired
+        record.waypoint = flown
+        self._pending_waypoint = flown
         self.records.append(record)
         return decision.objective, OBJECTIVE_PHASE[decision.objective]
 
@@ -127,8 +150,11 @@ class LLMAgentPolicy:
              record: LLMDecisionRecord) -> Optional[Decision]:
         correction = None
         for attempt in (1, 2):
+            checked = (self.tools.checked_points(belief)
+                       if self.assist == "context" and Objective.GO_TO_WAYPOINT in legal else ())
             prompt = build_prompt(belief, event, legal, self.fallback.listen_rounds, correction,
-                                  sectors=self.sectors, spawn_offset=self.spawn_offset)
+                                  sectors=self.sectors, spawn_offset=self.spawn_offset,
+                                  checked_points=checked)
             record.prompts.append(prompt)
             try:
                 raw = self.backend.complete(prompt, self.timeout_s)
@@ -168,8 +194,12 @@ def make_policy_factory(backend: ModelBackend, scenario, **kwargs):
     policies = {}
 
     def factory(name):
-        policies[name] = LLMAgentPolicy(backend, sectors=scenario.sectors,
-                                        spawn_offset=offsets.get(name, (0.0, 0.0, 0.0)), **kwargs)
+        offset = offsets.get(name, (0.0, 0.0, 0.0))
+        extra = {}
+        if kwargs.get("assist", "off") != "off":
+            extra["tools"] = ReasoningTools(scenario, spawn_offset=offset)   # each drone: its own tools + guardian
+        policies[name] = LLMAgentPolicy(backend, sectors=scenario.sectors, spawn_offset=offset,
+                                        **kwargs, **extra)
         return policies[name]
 
     return factory, policies

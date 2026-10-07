@@ -186,6 +186,15 @@ class SafetyGuardian:
         return GuardianEvaluation(GuardianOutcome.APPROVE_WITH_MODIFICATION, narrowed, reason, None,
                                    [c.name for c in failed])
 
+    def preview(self, command: Command, belief) -> List[SafetyCheck]:
+        """Dry run: which checks would this command fail? Touches NO guardian state - no
+        counters, no in-flight flag, no escalation - so a caller (the Phase 12.5 reasoning
+        tools) can ask "is this point legal?" any number of times without ever affecting a
+        real evaluate(). Skips conflicting_commands, which is about the vehicle's current
+        activity, not about whether the destination itself is acceptable."""
+        return [c for c in self._run_checks(command, belief)
+                if not c.passed and c.name != "conflicting_commands"]
+
     def _should_escalate(self) -> bool:
         return (self.consecutive_rejections >= self.max_consecutive_rejections or
                 self.consecutive_interventions >= self.max_consecutive_interventions)

@@ -28,7 +28,8 @@ def summarize(policies: Dict[str, object], agents: Dict[str, object]) -> dict:
         "corrected": sum(1 for r in records if r.corrected),
         "rejected_as": rejections,
         "model_chose": chosen,
-        "waypoints_proposed": sum(1 for r in records if r.waypoint is not None),
+        "waypoints_proposed": sum(1 for r in records if r.raw_waypoint is not None),
+        "waypoints_repaired": sum(1 for r in records if r.repaired),
         "guardian_blocked": len(blocked),
         "guardian_blocked_checks": sorted({c for e in blocked for c in e.failed_checks}),
     }
@@ -43,7 +44,9 @@ def save_run(directory: str, policies: Dict[str, object], agents: Dict[str, obje
                 "drone": name, "model_card": card,
                 "decisions": [{
                     "step": r.step, "source": r.source, "objective": r.objective.value,
-                    "reason_code": r.reason_code, "waypoint": r.waypoint, "rejected_as": r.rejected_as,
+                    "reason_code": r.reason_code, "waypoint": r.waypoint, "raw_waypoint": r.raw_waypoint,
+                    "repaired": r.repaired, "repair_distance_m": r.repair_distance_m,
+                    "rejected_as": r.rejected_as,
                     "corrected": r.corrected, "prompts": r.prompts, "raw_outputs": r.raw_outputs,
                 } for r in policy.records],
             }, f, indent=2)

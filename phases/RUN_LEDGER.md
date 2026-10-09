@@ -65,6 +65,25 @@ Fill in exact dates and folders when Arshad confirms them.
 
 | `runs/probe_llama31_8b_dynamic_zones`, 100 seeded situations (seed 17, same as `probe_llama31_8b_schema_v2`), llama3.1:8b digest 46e0c10c039e, temp 0, CPU, scenario `search_relay_dynamic_001` (zones DZ_A from 10 s, DZ_D from 60 s). Laptop slept during the run; 0 fallbacks/timeouts | none 16% legal (static 17%); context 92% (98%); repair 14% raw, 100% flown legal, 86% needed repair at mean 5.1 m (85%, 5.0); feedback retry legal 8% (8%), same point again 65% (61%). On the model's own first proposal: separation 83 (same as static) plus restricted_zones 17. Replay: 23 of 100 situations start inside an active zone, mean steer-out 6.3 m, max 9.5 m | diagnostic series under dynamic zones. Compared like-for-like with the static series (the `none` and `feedback`-first answers are identical inputs; `context`/`repair` prompts change with the zones). The 98%->92% drop in `context` is 5 zone cases (model chose a sector centre inside an active zone) + 3 separation cases; the prompt text was not inspected. Zone placement makes the 23% inside-zone share by construction. Not yet declared a frozen series |
 
+### Landing investigation, night of 2026-10-08 (Claude ran the simulator while Arshad slept)
+
+| Check | Result | Verdict |
+|---|---|---|
+| Arshad's second full solo mission (`run_persistent_agent.py --airsim --sector A`) | landing step 64.0 s (154.2 to 218.2), final height -11.8 m again, same as the first | reproduced **by Arshad**, deterministic on his side |
+| Arshad's `trace_landing.py --out-and-back 40` and `--hover-s 150`, then `--hover-s 60` | both read -11 to -12 (only the summary was relayed; the trace rows were not pasted). He also reports the drone starts on beach sand and ends at the same spot, and that after a bad landing a manual take-off is very slow, "as if from underground" | reported, not independently verified. Consistent with the drone actually ending ~12 m below the surface |
+| Claude, fresh sim, `trace_landing.py --stop-above 0.3` (no `landAsync`, no disarm) | settles at 0.01-0.07 m, no sinking | clean |
+| Claude, fresh sim, plain `trace_landing.py` | `land()` 7.0 s, ends 0.00 m, est_z = true_z throughout | clean |
+| Claude, `--hover-s 60` | 6.1 s, ends 0.00 m | clean |
+| Claude, 24 CPU cores saturated, `--hover-s 10`, fresh sim | 6.2 s, ends -0.01 m | clean: CPU load is not the trigger |
+| Claude, full solo mission, fresh sim, default cruise height | different failure: the first lane overshoots to (41.2, 20.0, 8.7) and the drone collides with `SM_Awning41`; return_home and the 30 s legs time out; landing on the awning took 64 s. Landing there also read high, not -11.8 | **separate finding**: obstacles at the east edge of Sector A in Town10HD. Reproduced twice here; Arshad's missions did not hit it (his lane ended at (40.0, 20.1)) |
+| Claude, same mission at `--cruise-height 12` | lane clears the awning, then another 30 s timeout near (39.8, 29.2); return_home timed out at (3.3, 2.2); landing was clean (8.8 s, final height -0.0) | more obstacles at x ~ 40; altitude alone does not fix the scenario geometry |
+
+**Correction to the earlier "not reproduced" note above:** the -11.8 m / 64 s landing *was* reproduced by Arshad (twice in missions, and in trace variants). What Claude could not do is reproduce it on this machine in six landings across four fresh-sim setups. Whatever triggers it is something about Arshad's own sessions that the fresh-sim runs did not recreate. Ruled out: CPU load, hovering time, the `landAsync`/disarm stage in isolation (clean here), horizontal drift.
+
+**What was done about it:** `AirSimVehicleAdapter.land()` now checks its own final height and raises if the drone ends more than 1.5 m from the ground reference (`LAND_END_TOLERANCE_M`), so the skill returns FAILED with the height in the error instead of reporting a quiet success. This makes the anomaly impossible to miss; it does not explain it. Landing-based safety numbers still must not be cited.
+
+| `runs/probe_llama31_8b_dynamic_zones_shown`, same 100 situations/seed/model/scenario as `probe_llama31_8b_dynamic_zones`, but `--show-zones` (prompt lists the zones active at decision time, current position). 0 fallbacks | none 19% legal (blind-dynamic 16%, static 17%); context 93% (92%, 98%); repair 100% flown legal at mean 4.8 m (5.1, 5.0); feedback retry legal 11% (8%), same point again 54% (65%). First-proposal failures: separation 73 (83), restricted_zones **25 (17)** | diagnostic. Telling the model about zones did not reduce zone violations (rose 17 to 25); separation violations fell 83 to 73. Single seed and one 8B model, so the changes are within what noise could plausibly produce; no mechanism tested. Not a frozen series |
+
 Open: the -11.8 m / 64 s landing from the full mission. Next step is to repeat the full mission a few times and log `land()` duration and the post-landing position each time, to see whether it recurs.
 
 ## 4. Conditions of the data

@@ -57,3 +57,26 @@ def test_never_settling_times_out_instead_of_recording_a_bad_ground():
     a = make_adapter(clock, lambda t: 5.0, lambda t: 3.0)
     with pytest.raises(TimeoutError, match="never settled"):
         a._wait_until_settled(sleep=clock.sleep, clock=clock.now)
+
+
+class TestLandingEndCheck:
+    """The landing must fail loudly if it ends away from the ground reference."""
+
+    def _adapter(self, height):
+        a = AirSimVehicleAdapter.__new__(AirSimVehicleAdapter)
+        a.vehicle_name = "Drone1"
+        a.get_height = lambda: height
+        return a
+
+    def test_ending_on_the_ground_reference_passes(self):
+        self._adapter(0.0)._check_landed()
+        self._adapter(-0.4)._check_landed()    # resting a little low
+        self._adapter(1.2)._check_landed()     # a slightly higher patch of ground
+
+    def test_the_observed_minus_11_8_is_a_failure(self):
+        with pytest.raises(RuntimeError, match="-11.80 m"):
+            self._adapter(-11.8)._check_landed()
+
+    def test_landing_on_top_of_something_is_a_failure_too(self):
+        with pytest.raises(RuntimeError, match=r"\+8\.70 m"):
+            self._adapter(8.7)._check_landed()

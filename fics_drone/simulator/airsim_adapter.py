@@ -16,7 +16,7 @@ import time
 
 from ..control.navigation import (
     DEFAULT_HEIGHT, GROUND_SETTLE_DRIFT_M, GROUND_SETTLE_POLL_S, GROUND_SETTLE_SPEED_MPS,
-    GROUND_SETTLE_TIMEOUT_S, GROUND_SETTLE_WINDOW_S, LAND_FAST_ABOVE, LAND_FAST_SPEED, LAND_SETTLE_SECS,
+    GROUND_SETTLE_TIMEOUT_S, GROUND_SETTLE_WINDOW_S, LAND_END_TOLERANCE_M, LAND_FAST_ABOVE, LAND_FAST_SPEED, LAND_SETTLE_SECS,
     LAND_SLOW_SPEED, MOVE_SPEED,
 )
 from ..core.enums import ActionType
@@ -254,6 +254,17 @@ class AirSimVehicleAdapter(VehicleAdapter):
             self.client.landAsync(vehicle_name=self.vehicle_name, timeout_sec=60).join()
             # armDisarm is also a plain synchronous call with no timeout concept at all.
             _with_timeout(lambda: self.client.armDisarm(False, self.vehicle_name), RPC_READ_TIMEOUT_S)
+        self._check_landed()
+
+    def _check_landed(self):
+        """Raise if the drone did not end the landing on the ground reference. The position read
+        here is the same one every later metric uses, so a wrong ending height must fail loudly
+        now rather than flow into the logs as a successful landing."""
+        height = self.get_height()
+        if abs(height) > LAND_END_TOLERANCE_M:
+            raise RuntimeError(
+                f"{self.vehicle_name} landing ended {height:+.2f} m from the ground reference "
+                f"(tolerance {LAND_END_TOLERANCE_M} m): not on the ground it took off from")
 
     # --- run a validated plan ---
 

@@ -31,6 +31,11 @@ GROUND_SETTLE_WINDOW_S = 1.0    # ...for this long before ground_z is recorded
 GROUND_SETTLE_TIMEOUT_S = 15.0  # give up (take-off fails) rather than record a bad ground
 GROUND_SETTLE_POLL_S = 0.1
 
+# After land() the drone should be resting on the ground reference. Anything further than this from it
+# means the landing did not end where it was meant to (observed live: a full mission read -11.8 m and
+# took ~64 s; landing on an awning reads high). Reported as a failed landing, not a quiet success.
+LAND_END_TOLERANCE_M = 1.5
+
 SKILL_SETTLE_SECS = 0.5   # HOLD_POSITION: small extra margin after start_hover(), on top
                           # of go_to_waypoint's own speed gate - same idea as
                           # LAND_SETTLE_SECS above, applied to holding instead of landing

@@ -65,14 +65,15 @@ same situations, same model and seed; `runs/probe_llama31_8b_dynamic_zones`, com
 `scripts/analyze_dynamic_probe.py`). The model is never told about zones, so the question is what the guardian
 has to catch:
 
-| | static zones | dynamic zones |
-|---|---|---|
-| model alone, legal | 17% | 16% |
-| with pre-computed facts, legal | 98% | 92% |
-| snapped to nearest legal point, legal | 100% | 100% |
-| needed repair / mean repair move | 85% / 5.0 m | 86% / 5.1 m |
-| illegal first proposals that also hit a zone | n/a | 17 of 84 |
-| retry after the guardian's reason is legal | 8% | 8% |
+| | static zones | dynamic zones, model not told | dynamic zones, model told |
+|---|---|---|---|
+| model alone, legal | 17% | 16% | 19% |
+| with pre-computed facts, legal | 98% | 92% | 93% |
+| snapped to nearest legal point, legal | 100% | 100% | 100% |
+| needed repair / mean repair move | 85% / 5.0 m | 86% / 5.1 m | 84% / 4.8 m |
+| first proposals that violate a zone | n/a | 17 | 25 |
+| first proposals that violate separation | 83 | 83 | 73 |
+| retry after the guardian's reason is legal | 8% | 8% | 11% |
 
 The zones changed little because the model's dominant error is already flying to a teammate's position
 (83 separation violations either way); only one proposal became newly illegal. The one clear effect is on the
@@ -81,6 +82,14 @@ that now lies inside an active zone. Why it did so despite the facts in its prom
 scenario 23 of the 100 situations start with the drone already inside an active zone (zones were placed over
 sectors where situations are sampled, so that share is by construction); the guardian's steer-out would move
 those drones a mean of 6.3 m (max 9.5 m). Timeouts and fallbacks: none.
+
+*Telling the model about the zones* (third column; `--show-zones`, `runs/probe_llama31_8b_dynamic_zones_shown`):
+the prompt lists the zones active at decision time at their current position. It did **not** help: the number
+of first proposals inside a zone went **up** (17 to 25) while separation violations went down (83 to 73), and
+the legal rate moved from 16% to 19%. Possibly the model anchors on the listed boxes (it is also shown the
+sector boxes, which overlap the zones), but with one seed, 100 situations and one 8B model, differences of
+this size are not reliable and no mechanism was tested. The defensible reading is that visibility did not make
+the model avoid zones, so the guardian and repair layer still do the work.
 
 ## Limitations
 

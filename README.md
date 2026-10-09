@@ -35,7 +35,8 @@ branch).
 ## Results so far
 
 Everything here is from a mock vehicle or a local 8B model. **Nothing yet comes from a live flight with a
-dynamic zone**, and no run yet puts a language model next to a dynamic zone. Treat these as pilot numbers.
+dynamic zone**, and the only language-model evidence near a dynamic zone is the waypoint probe below (single
+waypoints, not whole missions). Treat these as pilot numbers.
 
 *Dynamic zones, deterministic policy, kinematic mock, four agents* (`runs/dynamic_zone_mock_pilot_v3`):
 
@@ -58,6 +59,28 @@ pre-computed facts about candidate points 98%; with its answer snapped to the ne
 move of 5 m. Telling the model the guardian's reason and asking again fixes only 8% of illegal proposals, and
 61% of the time it proposes the same point again. Its self-reported confidence is the same (0.8) for legal and
 illegal proposals, so it carries no signal.
+
+*The same probe with two dynamic zones* (one over Sector A active from 10 s, one over Sector D from 60 s;
+same situations, same model and seed; `runs/probe_llama31_8b_dynamic_zones`, compared with
+`scripts/analyze_dynamic_probe.py`). The model is never told about zones, so the question is what the guardian
+has to catch:
+
+| | static zones | dynamic zones |
+|---|---|---|
+| model alone, legal | 17% | 16% |
+| with pre-computed facts, legal | 98% | 92% |
+| snapped to nearest legal point, legal | 100% | 100% |
+| needed repair / mean repair move | 85% / 5.0 m | 86% / 5.1 m |
+| illegal first proposals that also hit a zone | n/a | 17 of 84 |
+| retry after the guardian's reason is legal | 8% | 8% |
+
+The zones changed little because the model's dominant error is already flying to a teammate's position
+(83 separation violations either way); only one proposal became newly illegal. The one clear effect is on the
+pre-computed-facts condition (98% to 92%): in 5 of the 8 illegal cases the model chose the centre of a sector
+that now lies inside an active zone. Why it did so despite the facts in its prompt was not investigated. In this
+scenario 23 of the 100 situations start with the drone already inside an active zone (zones were placed over
+sectors where situations are sampled, so that share is by construction); the guardian's steer-out would move
+those drones a mean of 6.3 m (max 9.5 m). Timeouts and fallbacks: none.
 
 ## Limitations
 

@@ -104,9 +104,14 @@ the model avoid zones, so the guardian and repair layer still do the work.
   per-tick monitor (flight legs, dynamic zones only) is on.
 - **The scripted policy never waits for a zone to expire**: when a zone blocks its sector it gives up and returns
   home, so "zone appears" and "zone appears, then expires" give identical results.
-- **One unexplained live anomaly:** in one full solo mission the final height read -11.8 m and landing took about
-  64 s; a separate landing trace was clean and did not reproduce it. Landing-based safety numbers should not be
-  cited until this is resolved (see `phases/RUN_LEDGER.md`).
+- **Noclip changes what a live run means.** Pressing P in the CarlaAir window toggles noclip: nothing collides,
+  the ground included. With it off, the drone can fly into street furniture (an awning at the east edge of
+  Sector A stops the first lane); with it on it passes through everything. These are different experimental
+  conditions and every live run must record which was used. An earlier live anomaly (final height -11.8 m, landing
+  about 64 s) was this: with noclip on, `landAsync` descends 0.2 m/s with nothing to stop it. `land()` now probes
+  for ground contact instead and, with none, holds at the ground reference and stays armed (the sim lets such a
+  drone fall once the script exits, which does not affect a run's result). Fixed and verified in both modes; the
+  full account is in `phases/RUN_LEDGER.md`.
 
 ## Reproducing it
 

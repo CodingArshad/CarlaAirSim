@@ -80,3 +80,17 @@ class TestLandingEndCheck:
     def test_landing_on_top_of_something_is_a_failure_too(self):
         with pytest.raises(RuntimeError, match=r"\+8\.70 m"):
             self._adapter(8.7)._check_landed()
+
+
+class TestLandAsyncOnlyWhenHeldUp:
+    """Root cause of the live -11.8 m landing: landAsync descends 0.2 m/s until contact, 60 s timeout.
+    With no ground collision that is 12 m. It must not run when the drone is already at the ground."""
+
+    def test_at_the_ground_reference_landasync_is_skipped(self):
+        for h in (0.0, 0.05, 0.3, 0.9, -0.2):
+            assert AirSimVehicleAdapter._needs_land_async(h) is False, h
+
+    def test_clearly_above_the_ground_it_is_still_used(self):
+        # e.g. resting on an awning 8.7 m up: something is holding it, landAsync can settle it there
+        for h in (1.01, 2.0, 8.7):
+            assert AirSimVehicleAdapter._needs_land_async(h) is True, h

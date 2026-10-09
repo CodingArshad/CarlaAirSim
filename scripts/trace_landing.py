@@ -88,6 +88,8 @@ def main():
         else:
             adapter.land()
         print(f"--- land() returned after {time.monotonic() - t:.1f}s ---")
+        if getattr(adapter, "landing_note", None):
+            print(f"--- landing note: {adapter.landing_note} ---")
         done.set()
 
     threading.Thread(target=do_land, daemon=True).start()

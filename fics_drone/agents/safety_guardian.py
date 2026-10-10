@@ -97,6 +97,12 @@ class SafetyLimits:
     battery_reserve_frac: float = 0.10
     min_separation_m: float = 5.0
     exit_margin_m: float = 3.0  # how far outside a zone's edge an exit point is placed
+    # GMB look-ahead (off by default, so every earlier result stays reproducible): when > 0, a
+    # flight leg is rejected if a dynamic zone will cover the path at the moment the aircraft
+    # gets there, looking at most this many seconds ahead. Velocity-obstacle in spirit (path +
+    # speed + the zone's drift), but a sampled check, not the full VO construction.
+    lookahead_s: float = 0.0
+    lookahead_step_s: float = 1.0
 
     @classmethod
     def from_scenario(cls, scenario: Scenario, margin_m: float = 40.0) -> "SafetyLimits":
@@ -161,7 +167,7 @@ class SafetyGuardian:
         exit_evaluation = self._exit_active_zone(belief, position_world)
         if exit_evaluation is not None:
             return exit_evaluation
-        checks = self._run_checks(command, belief)
+        checks = self._run_checks(command, belief, position_world)
         failed = [c for c in checks if not c.passed]
 
         if not failed:
@@ -196,13 +202,13 @@ class SafetyGuardian:
         return GuardianEvaluation(GuardianOutcome.APPROVE_WITH_MODIFICATION, narrowed, reason, None,
                                    [c.name for c in failed])
 
-    def preview(self, command: Command, belief) -> List[SafetyCheck]:
+    def preview(self, command: Command, belief, position_world=None) -> List[SafetyCheck]:
         """Dry run: which checks would this command fail? Touches NO guardian state - no
         counters, no in-flight flag, no escalation - so a caller (the Phase 12.5 reasoning
         tools) can ask "is this point legal?" any number of times without ever affecting a
         real evaluate(). Skips conflicting_commands, which is about the vehicle's current
         activity, not about whether the destination itself is acceptable."""
-        return [c for c in self._run_checks(command, belief)
+        return [c for c in self._run_checks(command, belief, position_world)
                 if not c.passed and c.name != "conflicting_commands"]
 
     def _should_escalate(self) -> bool:
@@ -309,11 +315,12 @@ class SafetyGuardian:
                 updated = replace(updated, timeout_s=timeout)
         return updated
 
-    def _run_checks(self, command: Command, belief) -> List[SafetyCheck]:
+    def _run_checks(self, command: Command, belief, position_world=None) -> List[SafetyCheck]:
         checks = [
             self._check_altitude_bounds(command),
             self._check_geofence(command),
             self._check_restricted_zones(command, belief),
+            self._check_predicted_zone_conflict(command, belief, position_world),
             self._check_waypoint_validity(command),
             self._check_max_speed(command),
             self._check_command_timeout(command),
@@ -352,6 +359,51 @@ class SafetyGuardian:
             if zone.contains(x, y, t):
                 return SafetyCheck("restricted_zones", False, f"({x}, {y}) inside {zone.id}", Severity.HARD)
         return SafetyCheck("restricted_zones", True)
+
+    def _check_predicted_zone_conflict(self, command: Command, belief, position_world=None) -> SafetyCheck:
+        """GMB look-ahead. _check_restricted_zones asks "is the destination inside a zone right
+        now?"; a drifting or about-to-activate zone can cover the path or the destination by the
+        time the aircraft arrives. Sample the straight leg at the speed it will fly, and test each
+        sample against every DYNAMIC zone at the time the aircraft would be there. Static zones
+        are left to the existing check so turning this on changes only the dynamic behaviour."""
+        horizon = self.limits.lookahead_s
+        # mission legs only, like battery_reserve and separation: refusing "go home" over a zone that has
+        # drifted across the route made the drone's only way out unreachable, the policy kept proposing
+        # it, and the guardian escalated and ended the mission short of home (found in the first study
+        # run). Actually entering a zone is still caught by the per-tick monitor and exit_zone.
+        if (horizon <= 0.0 or command.kind != "fly" or command.target is None
+                or command.purpose != "mission"):
+            return SafetyCheck("predicted_zone_conflict", True)
+        t0 = self._now(belief)
+        speed = command.speed_mps
+        if t0 is None or not speed or speed <= 0.0 or not math.isfinite(speed):
+            return SafetyCheck("predicted_zone_conflict", True)
+        start = position_world if position_world is not None else getattr(belief, "position", None)
+        if start is None:
+            return SafetyCheck("predicted_zone_conflict", True)
+        dynamic = [z for z in self.limits.restricted_zones if z.is_dynamic]
+        if not dynamic:
+            return SafetyCheck("predicted_zone_conflict", True)
+        sx, sy = start[0], start[1]
+        tx, ty = command.target[0], command.target[1]
+        if not all(math.isfinite(v) for v in (sx, sy, tx, ty)):
+            return SafetyCheck("predicted_zone_conflict", True)  # waypoint_validity owns that
+        travel = math.hypot(tx - sx, ty - sy) / speed
+        end = min(travel, horizon)
+        step = max(self.limits.lookahead_step_s, 0.1)
+        dt = 0.0
+        while True:
+            frac = 1.0 if travel <= 0.0 else min(dt / travel, 1.0)
+            px, py = sx + (tx - sx) * frac, sy + (ty - sy) * frac
+            for zone in dynamic:
+                if zone.contains(px, py, t0 + dt):
+                    return SafetyCheck(
+                        "predicted_zone_conflict", False,
+                        f"path reaches ({px:.1f}, {py:.1f}) at t={t0 + dt:.1f}s, inside {zone.id} by then",
+                        Severity.HARD)
+            if dt >= end:
+                return SafetyCheck("predicted_zone_conflict", True)
+            dt = min(dt + step, end)
 
     def _check_waypoint_validity(self, command: Command) -> SafetyCheck:
         if command.target is None:

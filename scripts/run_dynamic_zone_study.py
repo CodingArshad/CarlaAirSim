@@ -58,14 +58,14 @@ def conditions(base, appear_s=5.0, expire_s=12.0, drift_s=3.0):
     }
 
 
-def run_once(scenario, monitor=True):
+def run_once(scenario, monitor=True, lookahead_s=0.0):
     adapters = {d.name: KinematicMockVehicleAdapter(d.name, speed_mps=MOCK_SPEED_MPS) for d in scenario.drones}
     offsets = {d.name: d.spawn_offset for d in scenario.drones}
     recorder = TelemetryRecorder(adapters, world_offsets=offsets)
     recorder.start()
     start = time.monotonic()
     reports, agents, _bus = run_team_threaded(scenario, adapters, bus=MessageBus(),
-                                              agent_kwargs={"zone_monitor": monitor})
+                                              agent_kwargs={"zone_monitor": monitor, "lookahead_s": lookahead_s})
     elapsed = time.monotonic() - start
     # one more sample before stopping: at 5 Hz the last sample can be 0.2 s stale, which for a drone
     # moving at 15 m/s is ~3 m and made already-landed drones read as "not home" in ~1 run in 5
@@ -117,6 +117,10 @@ def main():
     parser.add_argument("--scenario", default=DEFAULT_SCENARIO)
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--only", default=None, help="run one condition by name")
+    parser.add_argument("--arms", default="cmd,tick",
+                        help="comma list from: cmd (command boundary only), tick (per-tick monitor), "
+                             "look (command boundary + look-ahead), tick+look")
+    parser.add_argument("--lookahead-s", type=float, default=60.0, help="look-ahead horizon for look arms")
     parser.add_argument("--save", default=None, help="directory to write results.json into")
     args = parser.parse_args()
 
@@ -125,14 +129,17 @@ def main():
     for name, scenario in conditions(base).items():
         if args.only and name != args.only:
             continue
-        for monitor in ((False,) if name == "static" else (False, True)):
-            label = f"{name}/{'tick' if monitor else 'cmd '}"
+        arms = ["cmd"] if name == "static" else args.arms.split(",")
+        for arm in arms:
+            monitor = arm.startswith("tick")
+            look = args.lookahead_s if "look" in arm else 0.0
+            label = f"{name}/{arm:9}"
             runs = []
             for i in range(args.repeats):
-                r = run_once(scenario, monitor=monitor)
+                r = run_once(scenario, monitor=monitor, lookahead_s=look)
                 runs.append(r)
                 g, m = r["guardian"], r["mission"]
-                print(f"{label:18} run {i + 1}: cmds {g['commands']:3} interventions {g['interventions']:2} "
+                print(f"{label:28} run {i + 1}: cmds {g['commands']:3} interventions {g['interventions']:2} "
                       f"steer-outs {g['steer_outs']} ({g['steer_out_distance_m']} m) interrupts {g['zone_interrupts']} | "
                       f"exposure {m['zone_exposure_s']}s | coverage {m['coverage']:.0%} targets {len(m['targets_found'])} "
                       f"{m['mission_s']}s home={m['all_home']}")

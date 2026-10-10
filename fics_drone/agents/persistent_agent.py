@@ -89,7 +89,7 @@ class PersistentAgent:
                  drone_name: str = "drone", link: AgentLink = None,
                  task_board: TaskBoard = None, health_monitor: HealthMonitor = None,
                  kill_at_s: Optional[float] = None, comms_estimator: CommsEstimator = None,
-                 zone_monitor: bool = True):
+                 zone_monitor: bool = True, lookahead_s: float = 0.0):
         self.adapter = adapter
         # GMB: with zone_monitor on, every flight leg polls the guardian each control tick and stops
         # the moment the aircraft is inside a zone that has just become active. Off = the guardian
@@ -105,6 +105,8 @@ class PersistentAgent:
         # binary pass/fail) as the default - Guardian itself is untouched, still its
         # own class with its own tests, just no longer what a real agent flies with.
         self.guardian = guardian or SafetyGuardian(limits=SafetyLimits.from_scenario(scenario))
+        if lookahead_s > 0.0:  # GMB look-ahead (predicted_zone_conflict); 0 = off, the earlier behaviour
+            self.guardian.limits.lookahead_s = lookahead_s
         self.guardian_log = GuardianLog()
         self._pending_waypoint = None  # Phase 12: coordinates for a model-chosen GO_TO_WAYPOINT, one-shot
         self._pending_action = None  # Phase 12 (15-tool set): (tool, validated args) the model just chose, one-shot
